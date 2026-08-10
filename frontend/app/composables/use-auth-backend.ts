@@ -26,9 +26,35 @@ interface AuthState {
 const authUser = ref<UserOut | null>(null);
 const authStatus = ref<"loading" | "authenticated" | "unauthenticated">("loading");
 
+const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+function clearRefreshTimer() {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = undefined;
+  }
+}
+
+export function getTokenExpiryMs(token: string): number | null {
+  const payload = token.split(".")[1];
+  if (!payload) return null;
+
+  try {
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), "=");
+    const decoded = JSON.parse(atob(padded)) as { exp?: number };
+    return typeof decoded.exp === "number" ? decoded.exp * 1000 : null;
+  }
+  catch {
+    return null;
+  }
+}
+
 export function resetAuth() {
   authUser.value = null;
   authStatus.value = "unauthenticated";
+  clearRefreshTimer();
 }
 
 export const useAuthBackend = function (): AuthState {
@@ -54,10 +80,29 @@ export const useAuthBackend = function (): AuthState {
     }
   }
 
+  function scheduleRefresh() {
+    clearRefreshTimer();
+
+    const token = tokenCookie.value;
+    if (!token) return;
+
+    const expiresAtMs = getTokenExpiryMs(token);
+    if (!expiresAtMs) return;
+
+    const delayMs = Math.max(0, expiresAtMs - Date.now() - REFRESH_MARGIN_MS);
+    refreshTimer = setTimeout(() => {
+      refresh().catch(() => {
+        // refresh() already handles auth errors (clearing the token/redirecting);
+        // swallow here so an unhandled rejection doesn't surface from the timer.
+      });
+    }, delayMs);
+  }
+
   async function getSession(): Promise<void> {
     if (!tokenCookie.value) {
       authUser.value = null;
       authStatus.value = "unauthenticated";
+      clearRefreshTimer();
       return;
     }
 
@@ -66,6 +111,7 @@ export const useAuthBackend = function (): AuthState {
       const { data } = await $axios.get<UserOut>("/api/users/self");
       authUser.value = data;
       authStatus.value = "authenticated";
+      scheduleRefresh();
     }
     catch (error: any) {
       console.error("Failed to fetch user session:", error);
