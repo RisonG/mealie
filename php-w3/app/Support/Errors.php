@@ -53,6 +53,12 @@ class Errors
         return new JsonResponse(['status_code' => 422, 'message' => $message, 'data' => null], 422);
     }
 
+    /** Python returns a body of literally `null`; JsonResponse(null) would render `{}`. */
+    public static function nullBody(): JsonResponse
+    {
+        return (new JsonResponse())->setJson('null');
+    }
+
     /**
      * An unhandled server error. Starlette returns text/plain here, not a JSON detail object, which
      * is why /api/validators/household's 500 is not JSON.

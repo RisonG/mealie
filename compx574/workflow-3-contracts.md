@@ -293,3 +293,249 @@ leading/trailing hyphens stripped) because the lookup is on `recipes.slug` scope
 - OIDC beyond the not-configured branches of 1.5–1.8, and LDAP in 1.4, as stated per endpoint.
 - `mealie/routes/auth/auth_cache.py` — only used to back the authlib OAuth client, which is never
   constructed here.
+
+---
+
+## Round 2 — `users`
+
+17 endpoints from `mealie/routes/users/`. Mount points are set in
+`mealie/routes/users/__init__.py:6-15` and are not uniform: `api_tokens.py` and `crud.py` carry
+`/users` in their own router, while `registration.py`, `forgot_password.py`, `images.py` and
+`ratings.py` are included **with** `prefix="/users"`. Working the prefix out per file is the only way
+to get these paths right.
+
+Two facts that apply to the whole module:
+
+- **`auth_method` is stored as the enum name and serialized as the enum value.**
+  `mealie/db/models/users/users.py:45-48` defines `MEALIE = "Mealie"`. The `users.auth_method`
+  column holds `MEALIE`; `/api/users/self` returns `"authMethod": "Mealie"`. PHP must map
+  `MEALIE → Mealie`, `LDAP → LDAP`, `OIDC → OIDC` on the way out.
+- **`UserRatings` is a plain `BaseModel`** (`mealie/schema/user/user.py:105`), so the envelope is
+  `{"ratings": [...]}`; the items inside are `MealieModel`s and are camelCased.
+
+### 2.1 `POST /api/users/register`
+
+- **Python** — `mealie/routes/users/registration.py:20`, on a plain `APIRouter(prefix="/register")`
+  included with `prefix="/users"`. `BasePublicController`, so **anonymous**.
+- **Body** — `CreateUserRegistration` (`mealie/schema/user/registration.py:10`), a `MealieModel`, so
+  the client sends camelCase: `group`, `household`, `groupToken`, `email`, `username`, `fullName`,
+  `password`, `passwordConfirm`, `advanced`, `private`, `seedData`, `locale`. `email` and `username`
+  are lower-cased and stripped; `fullName` is stripped. Two validators run before the handler:
+  `password_confirm` must equal `password`, and `locale` must be a known locale — both are **422**.
+- **Validator precedence, measured against the oracle.** A third validator runs before the handler:
+  `group_or_token` (`registration.py:38-44`) rejects the body with **422** unless `group` or
+  `group_token` is truthy. So a registration with neither — the common case — never reaches the
+  handler's 403; it is a 422 whose `loc` is `('body', 'group_token')` for an absent token and
+  `('body', 'groupToken')` for an empty-string one. The 403 below is reachable only when `group` is
+  non-empty.
+- **Guard** — `registration.py:24-28`: when `ALLOW_SIGNUP` is false and `group_token` is null, or
+  `group_token` is the empty string, **403** with
+  `{"detail": {"message": "User Registration is Disabled", "error": true, "exception": null}}`.
+  `ErrorResponse` (`mealie/schema/response/responses.py:8`) is a plain `BaseModel`, so those three
+  keys keep their names. Note the Python precedence: `not ALLOW_SIGNUP and token is None` **or**
+  `token == ""` — an empty-string token is refused even when signup is allowed.
+- **Success** — **201** with `UserOut`.
+- **IDs** — the new user's dashed UUID in the response.
+- **Not implemented** — `RegistrationService.register_user` itself: group/household creation, seed
+  data, and the `user_signup` event dispatch. On this deployment `ALLOW_SIGNUP` is false
+  (`settings.py:176`), so every call without a group token is the 403 above and the service is
+  never reached. A call **with** a valid group token would be wrong in PHP; recorded, not hidden.
+
+### 2.2 `GET /api/users/self`
+
+- **Python** — `mealie/routes/users/crud.py:19`, on `UserAPIRouter(prefix="/users")`, so
+  `Depends(get_current_user)` → 401 as in round 1 §1.9.
+- **Schema** — `UserOut` (`mealie/schema/user/user.py:170`), a `MealieModel` → camelCase, in field
+  order: `id`, `username`, `fullName`, `email`, `authMethod`, `admin`, `group`, `household`,
+  `advanced`, `showAnnouncements`, `lastReadAnnouncement`, `canInvite`, `canManage`,
+  `canManageHousehold`, `canOrganize`, `groupId`, `groupSlug`, `householdId`, `householdSlug`,
+  `tokens`, `cacheKey`. `password`, `loginAttemps`, `lockedAt` and `tokensValidAfter` belong to
+  `PrivateUser` (`user.py:208`) and are **not** in this response.
+- **Joins** — `group` and `household` are the related rows' `name`, `groupSlug`/`householdSlug`
+  their `slug`. `tokens` is `LongLiveTokenOut` (`user.py:33`): `name`, `id` (an **integer**, not a
+  UUID), `createdAt`.
+- **IDs** — `id`, `groupId`, `householdId` are dashed; stored undashed.
+- **Not implemented** — nothing.
+
+### 2.3 `GET /api/users/self/ratings`
+
+- **Python** — `crud.py:23`. Authenticated user only.
+- **Schema** — `UserRatings[UserRatingSummary]` → `{"ratings": [...]}` where each item
+  (`user.py:71`) is `{"recipeId": <dashed>, "rating": <float|null>, "isFavorite": <bool>}`.
+  `is_favorite` has a before-validator turning null into `false` (`user.py:78-83`).
+- **Source** — `users_to_recipes` rows for the caller's own id. No `favorites_only` filter.
+- **Not implemented** — nothing.
+
+### 2.4 `GET /api/users/self/ratings/{recipe_id}`
+
+- **Python** — `crud.py:27`. `recipe_id` is typed `UUID4`, so a non-v4 value is a **422**.
+- **Found** — `UserRatingSummary`, the same three camelCase keys as §2.3.
+- **Not found** — **404** with
+  `{"detail": {"message": "User has not rated this recipe", "error": true, "exception": null}}`
+  (`crud.py:33-36`).
+- **Not implemented** — nothing.
+
+### 2.5 `GET /api/users/self/favorites`
+
+- **Python** — `crud.py:38`. As §2.3 but `favorites_only=True`, i.e. `is_favorite` is true.
+- **Not implemented** — nothing.
+
+### 2.6 `PUT /api/users/password`
+
+- **Python** — `crud.py:42`. Authenticated user; acts on the caller only.
+- **Body** — `ChangePassword` (`user.py:61`), a `MealieModel` → `currentPassword` (defaults to `""`)
+  and `newPassword`, which has `min_length=8`, so a shorter one is a **422** before the handler.
+- **Order of checks** — LDAP account → **400** `user.ldap-update-password-unavailable`; wrong
+  current password → **400** `user.invalid-current-password`; update failure → **400**
+  `"Failed to update password"`. All three are `ErrorResponse` under `detail`.
+- **Success** — `SuccessResponse` (`responses.py:22`), a plain `BaseModel`:
+  `{"message": "<user.password-updated>", "error": false}`.
+- **Translation keys** — `mealie/lang/messages/en-US.json`; only `en-US` is loaded (round 1 §1.10).
+- **Side effect** — bcrypt-hashes the new password and writes `users.password`. **This writes to the
+  shared database**, so the round's self-check must not call it with a correct current password.
+- **Not implemented** — nothing.
+
+### 2.7 `PUT /api/users/{item_id}`
+
+- **Python** — `crud.py:65`. `item_id` is `UUID4` → non-v4 is a **422**.
+- **Body** — `UserBase` (`user.py:109`), camelCase.
+- **Permission** — `assert_user_change_allowed` (`mealie/routes/users/_helpers.py:36-49`), and the
+  branches differ by role, which is the part worth getting right:
+  - **non-admin** (`_helpers.py:10-33`): editing anyone else → **403** `"User cannot edit other
+    users"`; changing any of `can_invite`, `can_manage`, `can_manage_household`, `can_organize`,
+    `admin` → **403** `"User cannot change their own permissions"`; changing `group` → **403**
+    `"User doesn't have permission to change their group"`; changing `household` → **403**
+    `"User doesn't have permission to change their household"`.
+  - **admin** (`_helpers.py:41-49`): editing anyone else → **403** `"Use the Admin API to update
+    other users"`; changing their own permission attributes → **403** `"Admins can't change their
+    own permissions"`.
+  - The token `run.sh` mints belongs to `bob`, who is **not** an admin, so the non-admin branch is
+    the one exercised.
+- **Success** — `SuccessResponse` with `user.user-updated`.
+- **Side effect** — writes the `users` row. Excluded from the self-check for the same reason as §2.6.
+- **Not implemented** — nothing.
+
+### 2.8 `POST /api/users/forgot-password`
+
+- **Python** — `mealie/routes/users/forgot_password.py:13`, a plain `APIRouter(prefix="")` included
+  with `prefix="/users"` — **anonymous**, no auth dependency.
+- **Body** — `ForgotPassword` (`mealie/schema/user/user_passwords.py:11`): `{"email": str}`. A
+  missing body is a **422**.
+- **Behaviour** — `PasswordResetService.send_reset_email`. SMTP is not configured here. For an
+  address with no matching user the oracle answers **200** with a body of literally `null`, and
+  writes nothing (verified).
+- **Not implemented** — sending mail, and creating the `password_reset_tokens` row. The PHP
+  returns what Python returns for an unknown address without writing a row. The behaviour for a
+  **known** address differs, and this is the one endpoint in the round where the PHP deliberately
+  does less than the Python rather than matching it. Recorded here, not stubbed silently.
+
+### 2.9 `POST /api/users/reset-password`
+
+- **Python** — `forgot_password.py:24`. Anonymous.
+- **Body** — `ResetPassword` (`user_passwords.py:23`), a `MealieModel`, fields `token`, `email`,
+  `password`, `passwordConfirm`. Note `passwordConfirm` is spelled camelCase **in the Python
+  source**, so camelizing it is a no-op — do not snake_case it.
+- **Behaviour** — `PasswordResetService.reset_password` looks the token up in
+  `password_reset_tokens`. An unknown token is **400** `{"detail": "Invalid token"}` — a bare
+  string detail, like §2.12's 404 and unlike the `ErrorResponse` objects elsewhere (verified).
+- **Not implemented** — the successful reset path, for the same reason as §2.8 and because it
+  writes `users.password`. The rejection path is implemented.
+
+### 2.10 `POST /api/users/{id}/image`
+
+- **Python** — `mealie/routes/users/images.py:19`, `UserAPIRouter(prefix="")` included with
+  `prefix="/users"`. Authenticated; `id` is `UUID4`.
+- **Body** — `multipart/form-data`, file field `profile`, required → missing is a **422**.
+- **Permission** — `assert_user_change_allowed(id, self.user, self.user)`. Passing the caller as
+  *both* current and new data means the permission-attribute and group/household comparisons always
+  compare equal, so the only check that can fire is the identity one: a non-admin editing another
+  user is **403** `"User cannot edit other users"`, an admin editing another user is **403**
+  `"Use the Admin API to update other users"`.
+- **Behaviour** — writes `<data>/users/<id>/profile.webp` and patches `users.cache_key`.
+- **Not implemented** — the image conversion and the file write. Pillow's WebP encoding is not
+  reproduced; the PHP implements the permission and validation path and stops before writing. This
+  also keeps the round from mutating the shared database via `cache_key`.
+
+### 2.11 `POST /api/users/api-tokens`
+
+- **Python** — `mealie/routes/users/api_tokens.py:21`, `UserAPIRouter(prefix="/users")` included
+  **without** an extra prefix. Authenticated.
+- **Body** — `LongLiveTokenIn` (`user.py:28`): `name`, `integrationId` (defaults to
+  `DEFAULT_INTEGRATION_ID`).
+- **Behaviour** — mints a token with claims `long_token: true`, `id` (the caller's **dashed** id),
+  `name`, `integration_id`, and a **1825-day** lifetime (`api_tokens.py:35-36`), then inserts a
+  `long_live_tokens` row.
+- **Success** — **201** with `LongLiveTokenCreateResponse` (`user.py:44`): `name`, `id` (integer),
+  `createdAt`, `token`.
+- **Side effect** — inserts a row. Excluded from the self-check.
+- **Not implemented** — nothing, but see the side-effect note.
+
+### 2.12 `DELETE /api/users/api-tokens/{token_id}`
+
+- **Python** — `api_tokens.py:49`. `token_id` is an **`int`**, not a UUID — `long_live_tokens.id` is
+  an INTEGER primary key. A non-integer is a **422**.
+- **Order of checks** — unknown id → **404** with the bare string detail
+  `"Could not locate token with id '<id>' in database"` (not an `ErrorResponse` object); a token
+  owned by someone else → **403** (`api_tokens.py:59-63`). Ownership is compared on `user_id`, not
+  on email.
+- **Success** — `DeleteTokenResponse` (`user.py:56`) → `{"tokenDelete": "<name>"}`.
+- **Not implemented** — nothing. The 404 and 403 paths do not write; the success path does and is
+  excluded from the self-check.
+
+### 2.13 `GET /api/users/{id}/ratings`
+
+- **Python** — `mealie/routes/users/ratings.py:44`, `UserAPIRouter()` **with no prefix of its own**,
+  included with `prefix="/users"`. Authenticated; `id` is `UUID4`.
+- **Permission** — `assert_user_change_allowed(id, self.user, self.user)`, so as in §2.10 only the
+  identity check can fire: asking for another user's ratings is a **403**, with the message
+  depending on whether the caller is an admin.
+- **Schema** — `UserRatings[UserRatingOut]`. `UserRatingOut` (`user.py:95`) extends
+  `UserRatingCreate`, so an item carries **five** keys, not three: `recipeId`, `rating`,
+  `isFavorite`, `userId`, `id` — all UUIDs dashed. This differs from the `/self/ratings` summary in
+  §2.3 and the difference is easy to miss.
+- **Not implemented** — nothing.
+
+### 2.14 `GET /api/users/{id}/favorites`
+
+- **Python** — `ratings.py:50`. As §2.13 with `favorites_only=True`.
+- **Not implemented** — nothing.
+
+### 2.15 `POST /api/users/{id}/ratings/{slug}`
+
+- **Python** — `ratings.py:56`. Authenticated; `id` is `UUID4`, `slug` is a free string.
+- **Body** — `UserRatingUpdate` (`user.py:90`): `rating` (float, nullable), `isFavorite` (bool,
+  nullable). Both optional, so `{}` is valid.
+- **Order** — permission check first (§2.13), then `get_recipe_or_404` (`ratings.py:23-42`), which
+  resolves `slug` **as a UUID first** and falls back to a slug lookup, scoped to the caller's group.
+  Not found → **404** `{"detail": {"message": "Not found.", "error": true, "exception": null}}`.
+- **Behaviour** — upsert into `users_to_recipes`: insert when the user has no row for that recipe,
+  otherwise update only the fields that were sent (`ratings.py:73-78`).
+- **Response** — the handler returns `None`, so the body is `null` with status **200**.
+- **Side effect** — writes. Excluded from the self-check; the 403 and 404 paths are safe to call.
+- **Not implemented** — nothing.
+
+### 2.16 `POST /api/users/{id}/favorites/{slug}`
+
+- **Python** — `ratings.py:80`. Calls §2.15 with `is_favorite=True` and no rating, so every status
+  and body above applies unchanged.
+- **Not implemented** — nothing.
+
+### 2.17 `DELETE /api/users/{id}/favorites/{slug}`
+
+- **Python** — `ratings.py:85`. Calls §2.15 with `is_favorite=False`. Note this **updates** the row
+  rather than deleting it, and creates one if none existed.
+- **Not implemented** — nothing.
+
+### Out of scope for round 2
+
+- Administering *other* users (`GET /api/users`, admin-side create/delete) lives in
+  `mealie/routes/admin/` and belongs to round 9.
+- Email delivery and the password-reset token lifecycle (§2.8, §2.9).
+- Profile image encoding and storage (§2.10).
+- `RegistrationService`, including group and household creation and seed data (§2.1).
+
+### Database safety for this round
+
+Seven endpoints write: §2.6, §2.7, §2.10, §2.11, §2.12 (success path), §2.15, §2.16, §2.17. The
+round's self-check exercises their rejection paths only, and `dev/data/mealie.db` is compared
+against `dev/data/mealie.w3-snapshot.db` after the run.

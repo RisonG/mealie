@@ -93,12 +93,21 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | 2026-10-10 ~21:33 | R1 | 16 routes written from the contract. Self-check (`sandbox/compare.sh`, 25 requests against both backends, `compx574/hurl/` not read or run): **22 identical, 3 differing**. All three differences are the free-text `message` of a 422 — status and the three body keys match; Python's text appends the oracle's own absolute source path (`/workspaces/mealie/...`), which is not reproducible and not attempted. One was tightened anyway: an absent body now reports `missing` at `('body',)` rather than a shape error |
 | 2026-10-10 ~21:34 | R1 | **After round 1: 27/265** (R1 16/33, R2 2/83, R3 8/73, R4 1/76) — `results/p1-after-round1.txt`. All 16 round 1 endpoints PASS. `dev/data/mealie.db` sha `280e922e…` unchanged by the run, so no handler wrote to the shared database |
 
+| 2026-10-11 ~00:50 | Gate 1 | Operator answered "继续" again, so gate 1 passed unchanged and round 2's contract was written. Same delegation as D7a |
+| 2026-10-11 ~00:55 | R2 | Round 2 contract written: 17 endpoints from `mealie/routes/users/`. Findings: the mount prefixes are **not** uniform — `api_tokens.py` and `crud.py` carry `/users` themselves while `registration.py`, `forgot_password.py`, `images.py` and `ratings.py` are included with it, so the prefix has to be worked out per file; `users.auth_method` stores the enum **name** (`MEALIE`) but serializes the **value** (`Mealie`); `/users/self/ratings` returns a 3-key summary while `/users/{id}/ratings` returns a 5-key `UserRatingOut`; `assert_user_change_allowed` is called with the caller as both arguments in four handlers, which disables every check except the identity one; `DELETE /users/api-tokens/{token_id}` takes an **integer** id and answers 404 with a bare string detail rather than an ErrorResponse object. Seven endpoints write to the database and are listed so the self-check exercises only their rejection paths. No PHP written |
+
+| 2026-10-11 ~01:05 | Gate 2 | Operator answered "继续", so gate 2 passed unchanged — agent-run, as D7a. The operator also asked how closely the gate should be reviewed and was told what a skim can and cannot catch; no change to this round |
+| 2026-10-11 ~01:20 | R2 | 17 routes written. Three contract entries were corrected against the oracle **before** implementing: `POST /users/register` is a 422 from the `group_or_token` field validator before the handler's 403 can run, unless `group` is non-empty; `forgot-password` answers 200 with a body of literally `null` for an unknown address; `reset-password` answers 400 `{"detail":"Invalid token"}` with a bare string detail |
+| 2026-10-11 ~01:25 | R2 | Self-check (`sandbox/compare.sh`, 31 requests, bodies included — the script gained JSON-body support this round): **19 identical, 12 differing**. Every status matches; all 12 differences are the free-text `message` of a 422, where Python appends the oracle's own source path and pydantic's `ctx`, and reports every error in a body while this implementation reports the first. `GET /users/self` matches byte for byte, which exercises the camelCase mapping, the `MEALIE → Mealie` enum conversion, the group/household joins and the token list. One real defect was found and fixed: Laravel renders `JsonResponse(null)` as `{}`, so `forgot-password` needed an explicit `null` body |
+| 2026-10-11 ~01:30 | R2 | **After round 2: 44/265** (R1 **33/33**, R2 2/83, R3 8/73, R4 1/76) — `results/p2-after-round2.txt`. All 18 `/api/users` requests PASS. R1 is now complete; W5 finished that region at 28/33. `dev/data/mealie.db` sha unchanged, so none of the round's seven writing endpoints was reached |
+
 ## Results so far
 
 | Label | Score | R1 | R2 | R3 | R4 |
 |---|---|---|---|---|---|
 | `p0-floor` — skeleton, no routes | 12/265 | 2/33 | 2/83 | 7/73 | 1/76 |
 | `p1-after-round1` — app, auth, validators, utils | 27/265 | 16/33 | 2/83 | 8/73 | 1/76 |
+| `p2-after-round2` — users | 44/265 | 33/33 | 2/83 | 8/73 | 1/76 |
 
 Region labels are W5's four areas, kept unchanged in `measure.sh` so the two workflows' breakdowns
 line up. They do not correspond to W3's rounds.

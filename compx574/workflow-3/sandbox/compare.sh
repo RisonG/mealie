@@ -27,18 +27,18 @@ echo App\Auth\Jwt::encode([\"sub\"=>App\Support\Guid::dash(\$row->id),\"rme\"=>f
 ')
 
 same=0; diff=0
-while IFS='|' read -r method path auth; do
+while IFS='|' read -r method path auth body; do
   [ -z \"\$method\" ] && continue
   case \"\$method\" in \\#*) continue ;; esac
   hdr=''
   [ \"\$auth\" = 'auth' ] && hdr=\"Authorization: Bearer \$token\"
 
+  set -- -s -X \"\$method\" -w '\n%{http_code}'
+  [ -n \"\$hdr\" ] && set -- \"\$@\" -H \"\$hdr\"
+  [ -n \"\$body\" ] && set -- \"\$@\" -H 'Content-Type: application/json' -d \"\$body\"
+
   for base in http://127.0.0.1:9000 http://127.0.0.1:9001; do
-    if [ -n \"\$hdr\" ]; then
-      out=\$(curl -s -X \"\$method\" -H \"\$hdr\" -w '\n%{http_code}' \"\$base\$path\" 2>/dev/null || true)
-    else
-      out=\$(curl -s -X \"\$method\" -w '\n%{http_code}' \"\$base\$path\" 2>/dev/null || true)
-    fi
+    out=\$(curl \"\$@\" \"\$base\$path\" 2>/dev/null || true)
     code=\$(printf '%s' \"\$out\" | tail -1)
     body=\$(printf '%s' \"\$out\" | sed '\$d' | head -c 400)
     if [ \"\$base\" = http://127.0.0.1:9000 ]; then pc=\$code; pb=\$body; else hc=\$code; hb=\$body; fi
