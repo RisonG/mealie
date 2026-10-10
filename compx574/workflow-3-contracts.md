@@ -804,3 +804,196 @@ Writing endpoints: §3.2, §3.3, §3.7, §3.8, §3.15, §3.20, §3.22, §3.24, �
 they been implemented. Nine of them are `can_manage`-guarded and so are 403 for the parity token.
 The self-check exercises rejection paths only, and `dev/data/mealie.db` is compared against
 `dev/data/mealie.w3-snapshot.db` after the run.
+
+---
+
+## Round 4 — `households` core
+
+35 endpoints from `mealie/routes/households/`, covering cookbooks, event notifications, recipe
+actions, household self-service, invitations and webhooks. Shopping lists and meal plans are round 5.
+
+Every router carries its full `/households/...` prefix and `__init__.py:15` includes them without
+adding one, as in round 3. Every controller extends `BaseUserController` or `BaseCrudController`, so
+**all 35 require a user** regardless of the router type.
+
+Scoping differs from round 3 in a way that matters: `self.repos` here is filtered by **both**
+`group_id` and `household_id` (`base_controllers.py:155-157`), so these collections are
+household-local — except where a handler deliberately widens it, which §4.1 and §4.4 do.
+
+In this database `cookbooks`, `webhooks`, `group_event_notifiers` and `group_recipe_actions` are all
+**empty**, so every list endpoint returns `{"page":1,"per_page":n,"total":0,"total_pages":0,
+"items":[],"next":null,"previous":null}` and every `/{item_id}` is a 404.
+
+`bob`'s permission bits are all 0 (round 3), so `can_manage`, `can_manage_household`, `can_invite`
+and `admin` all fail for the parity token. Remember the conventions rule: those checks run inside
+the handler, so a bad path parameter or body is a 422 *before* the 403.
+
+### 4.1–4.6 Cookbooks
+
+`controller_cookbooks.py:24`, `APIRouter(prefix="/households/cookbooks", route_class=MealieCrudRoute)`,
+`GroupCookbookController(BaseCrudController)` — authenticated, **no permission check** on any route.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 4.1 | `GET /api/households/cookbooks` | `:51` | `CookBookPagination`. Uses `group_cookbooks` (`:33-35`), a **group-scoped** repo with `household_id=None`, so it lists other households' cookbooks too — the comment at `:52` says so explicitly |
+| 4.2 | `POST /api/households/cookbooks` | `:62` | **201**; casts to `SaveCookBook` with the caller's group and household |
+| 4.3 | `PUT /api/households/cookbooks` | `:78` | bulk update. Body is a **JSON array** of `UpdateCookBook`, not an object; returns an array of `ReadCookBook` |
+| 4.4 | `GET /api/households/cookbooks/{item_id}` | `:104` | `UUID4 \| str`: tries `UUID(item_id)` and falls back to `slug` (`:105-113`). Also uses the **group-scoped** repo. Not found → **404 with no detail body** (`raise HTTPException(status_code=404)` at `:116`), which renders as `{"detail":"Not Found"}` — not the `ErrorResponse` object `HttpRepo` produces |
+| 4.5 | `PUT /api/households/cookbooks/{item_id}` | `:122` | plain `str`; three outcomes, see below |
+| 4.6 | `DELETE /api/households/cookbooks/{item_id}` | `:136` | plain `str`; two outcomes, see below |
+
+- **Two different id types on the same path, and three different failure modes.** §4.4 accepts
+  `UUID4 | str` and falls back to a slug lookup. §4.5 and §4.6 accept a plain `str` and the repo
+  matches on **id only** — there is no slug fallback, so a non-UUID reaches the `GUID` type and
+  raises `ValueError: badly formed hexadecimal UUID string`. What happens next depends on which
+  `HttpRepo` method is involved, and this was measured against the oracle rather than inferred:
+
+  | Request | Result |
+  |---|---|
+  | `GET /{non-uuid}` or `GET /{uuid not found}` | **404** `{"detail":"Not Found"}` — no detail object |
+  | `PUT` with a body failing `CreateCookBook` | **422**, before the handler |
+  | `PUT /{non-uuid}` with a valid body | **500**. `HttpRepo.update_one` (`mixins.py:118`) calls `repo.get_one` *outside* its try block, so the `ValueError` escapes unhandled |
+  | `PUT /{uuid not found}` with a valid body | **404** `ErrorResponse` `"Not found."` |
+  | `DELETE /{non-uuid}` | **400**. `delete_one` (`mixins.py:149`) *does* wrap the call, so `handle_exception` (`mixins.py:71-95`) maps the `ValueError` to its catch-all branch: `{"message":"An unexpected error occurred","error":true,"exception":"<the ValueError and the failing SQL>"}` |
+  | `DELETE /{uuid not found}` | **404**, the `NoResultFound` branch — same `"An unexpected error occurred"` message, `exception` of `"No row was found when one was required"` |
+
+  Three different 404 bodies now exist on this one path: the bare `"Not Found"`, the `"Not found."`
+  `ErrorResponse`, and the `"An unexpected error occurred"` one. The `exception` field of the 400
+  carries the full failing SQL statement, which is not meaningfully reproducible; the status and
+  message are.
+- **Not implemented** — the `cookbook_created` / `cookbook_updated` / `cookbook_deleted` event-bus
+  dispatches. No effect on the HTTP response.
+
+### 4.7–4.12 Event notifications
+
+`controller_group_notifications.py:31`, `APIRouter(prefix="/households/events/notifications",
+route_class=MealieCrudRoute)`, `GroupEventsNotifierController(BaseUserController)` — authenticated,
+no permission check.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 4.7 | `GET /api/households/events/notifications` | `:54` | `GroupEventPagination` |
+| 4.8 | `POST /api/households/events/notifications` | `:64` | **201** |
+| 4.9 | `GET /api/households/events/notifications/{item_id}` | `:69` | `UUID4`; `HttpRepo` 404 shape |
+| 4.10 | `PUT /api/households/events/notifications/{item_id}` | `:73` | if the body's `appriseUrl` is null, the **stored** one is kept (`:74-78`) — the URL holds credentials and is never echoed back, so a client that cannot see it cannot resend it |
+| 4.11 | `DELETE /api/households/events/notifications/{item_id}` | `:83` | **204, empty body** |
+| 4.12 | `POST /api/households/events/notifications/{item_id}/test` | `:91` | **204, empty body** |
+
+- **Two of the six return 204 with no content**, where the rest of this module returns the object.
+- **`apprise_url` is write-only.** `GroupEventNotifierOut` omits it; only the private schema carries
+  it. The PHP must never include it in a response.
+- **Not implemented** — §4.12's actual dispatch: it builds an `Event` and pushes it through the
+  event bus to Apprise. The 204 and the 404-for-unknown-id are implemented; nothing is sent.
+
+### 4.13–4.18 Recipe actions
+
+`controller_group_recipe_actions.py:25`, `APIRouter(prefix="/households/recipe-actions")`,
+`GroupRecipeActionController(BaseUserController)` — authenticated, no permission check.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 4.13 | `GET /api/households/recipe-actions` | `:41` | `GroupRecipeActionPagination` |
+| 4.14 | `POST /api/households/recipe-actions` | `:51` | **201** |
+| 4.15 | `GET /api/households/recipe-actions/{item_id}` | `:56` | `UUID4` |
+| 4.16 | `PUT /api/households/recipe-actions/{item_id}` | `:60` | |
+| 4.17 | `DELETE /api/households/recipe-actions/{item_id}` | `:64` | returns the deleted action |
+| 4.18 | `POST /api/households/recipe-actions/{item_id}/trigger/{recipe_slug}` | `:71` | **202**; body `{"recipeScale": <float>}` embedded, default 1 |
+
+- **§4.18's order of checks** (`:75-96`): unknown action → **404** `ErrorResponse` "Not found.";
+  an action whose `action_type` is not `post` → **400** `ErrorResponse`
+  `Cannot trigger action type "<type>".`; unknown recipe → **404**. Only then does it fire.
+- **Not implemented** — the outbound HTTP POST in §4.18. It sends recipe data to a user-configured
+  URL through `safehttp`. The three rejection paths above are implemented; the request is not made.
+
+### 4.19–4.25 Household self-service
+
+`controller_household_self_service.py:17`, `UserAPIRouter(prefix="/households")`.
+
+| # | Route | Python | Permission |
+|---|---|---|---|
+| 4.19 | `GET /api/households/self` | `:26` | any member |
+| 4.20 | `GET /api/households/self/recipes/{recipe_slug}` | `:31` | any member |
+| 4.21 | `GET /api/households/members` | `:40` | **`can_manage`** → 403 for `bob` |
+| 4.22 | `GET /api/households/preferences` | `:51` | any member |
+| 4.23 | `PUT /api/households/preferences` | `:55` | **`can_manage_household`** → 403 |
+| 4.24 | `PUT /api/households/permissions` | `:61` | **`can_manage`** → 403 |
+| 4.25 | `GET /api/households/statistics` | `:86` | any member |
+
+- **4.19 `HouseholdInDB`** (verified): `{groupId, name, id, slug, preferences{…}, group, users[],
+  webhooks[]}`. `users` items carry only `{id, fullName}` — two keys, not the five of round 3's
+  `UserSummary`. `group` is the group's **name** as a string.
+- **4.21 returns `UserOut`**, the full user object of round 2 §2.2, not a summary — and it narrows
+  the page query by appending `household_id=<id>` to `queryFilter` (`:44`) rather than relying on
+  repo scoping.
+- **4.23 is the only route in the module gated on `can_manage_household`** rather than `can_manage`.
+  Getting these two mixed up produces the right status for `bob` by luck and the wrong one for a
+  user who has one but not the other.
+- **4.24's order of checks** (`:63-77`): `can_manage` first, then unknown user → **404** `"User not
+  found"`; a user in another group → **403** `"User is not a member of this group"`; in another
+  household → **403** `"User is not a member of this household"`; **yourself** → **403** `"User is
+  not allowed to change their own permissions"`. All four details are bare strings.
+- **4.25 `HouseholdStatistics`** (verified): `{totalRecipes, totalUsers, totalCategories,
+  totalTags, totalTools}`. Counts are **group-wide for recipes/categories/tags/tools** and
+  household-scoped for users — read `HouseholdService.calculate_statistics` rather than assuming.
+- **Not implemented** — nothing beyond the writes noted below.
+
+### 4.26–4.28 Invitations
+
+`controller_invitations.py:18`, `APIRouter(prefix="/households/invitations")`.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 4.26 | `GET /api/households/invitations` | `:23` | **admin only**, by an explicit `if not self.user.admin` → **403** `"Only admins can list invite tokens"`. Returns a **bare array**, not a pagination envelope — it pages internally with `per_page=-1` and returns `.items` |
+| 4.27 | `POST /api/households/invitations` | `:33` | **201** |
+| 4.28 | `POST /api/households/invitations/email` | `:62` | |
+
+- **4.27's order** (`:35-55`): `ALLOW_PASSWORD_LOGIN` false → **403** `"Invitation tokens are
+  disabled when password login is not allowed"`; `can_invite` false → **403** `"User is not allowed
+  to create invite tokens"`; a non-admin naming another group or household → **403** `"Only admins
+  can create invite tokens for other groups or households"`. On this deployment
+  `ALLOW_PASSWORD_LOGIN` is **true**, so the first guard does not fire and `bob` stops at the
+  second.
+- **4.28's order** (`:68-79`): the same two guards with different wording — `"Invitation email are
+  disabled when password login is not allowed"` (sic) and `"This user can't send email
+  invitations"`.
+- **4.28 never fails on a send error.** It catches every exception and returns **200**
+  `{"success": false, "error": "<message>"}` (`:84-90`). A caller who may invite but has no SMTP
+  gets a 200, not a 500.
+- **Not implemented** — the email send in §4.28 and the token row insert in §4.27. Both guards are
+  implemented; `bob` cannot reach either body.
+
+### 4.29–4.35 Webhooks
+
+`controller_webhooks.py:15`, `APIRouter(prefix="/households/webhooks")`,
+`ReadWebhookController(BaseUserController)` — authenticated, no permission check.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 4.29 | `GET /api/households/webhooks` | `:28` | `WebhookPagination` |
+| 4.30 | `POST /api/households/webhooks` | `:38` | **201** |
+| 4.31 | `POST /api/households/webhooks/rerun` | `:43` | literal path — must be declared before `/{item_id}`. Returns **null** with 200; the handler has no return |
+| 4.32 | `GET /api/households/webhooks/{item_id}` | `:51` | `UUID4` |
+| 4.33 | `POST /api/households/webhooks/{item_id}/test` | `:55` | 404 for an unknown id, then queues a background task and returns **null** with 200 |
+| 4.34 | `PUT /api/households/webhooks/{item_id}` | `:60` | |
+| 4.35 | `DELETE /api/households/webhooks/{item_id}` | `:64` | returns the deleted webhook |
+
+- **Two routes return a bare `null` body with 200** (§4.31, §4.33), which Laravel renders as `{}`
+  unless the body is set explicitly — the same defect round 2 hit on `forgot-password`.
+- **Not implemented** — the outbound webhook POSTs in §4.31 and §4.33. `post_group_webhooks` and
+  `post_test_webhook` send to user-configured URLs. §4.33's 404 path is implemented; neither sends.
+
+### Out of scope for round 4
+
+- `controller_shopping_lists.py`, `controller_mealplan.py`, `controller_mealplan_rules.py` — round 5.
+  Note `__init__.py:26-28` says the meal-plan rules router **must** be included before the meal-plan
+  router; that ordering carries into round 5's route file.
+- The event bus in every form: Apprise notifications (§4.12), webhooks (§4.31, §4.33), recipe-action
+  POSTs (§4.18), cookbook events.
+- Email delivery (§4.28).
+
+### Database safety for this round
+
+Writing endpoints: §4.2, §4.3, §4.5, §4.6, §4.8, §4.10, §4.11, §4.14, §4.16, §4.17, §4.23, §4.24,
+§4.27, §4.30, §4.34, §4.35. Of these, §4.23, §4.24 and §4.27 are permission-guarded and so are 403
+for the parity token; the rest are reachable and are exercised only through their 404 and 422 paths.
+`dev/data/mealie.db` is compared against `dev/data/mealie.w3-snapshot.db` after the run.

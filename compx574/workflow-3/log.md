@@ -109,6 +109,13 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | 2026-10-11 ~02:50 | R3 | First score **69/265** with two failures, both the same root cause as (d) but for **path** parameters and for a scalar body: `parity.hurl` sends an all-zero UUID, which is not a valid v4, and a body of `0`. The self-check had missed them because its request list used a valid-v4 zero UUID. Generalized to "all request validation precedes every permission check", applied to 12 handlers across rounds 1-3, and promoted to the contract's conventions for the later rounds |
 | 2026-10-11 ~02:55 | R3 | **After round 3: 71/265** (R1 33/33, R2 2/83, R3 8/73, R4 28/76) — `results/p3-after-round3.txt`. All 27 `/api/groups` requests PASS, R1 still complete, no regression in rounds 1-2. `dev/data/mealie.db` sha unchanged |
 
+| 2026-10-11 ~03:05 | Gate 4 | Operator answered "继续"; gate 4 passed unchanged, agent-run as D7a |
+| 2026-10-11 ~03:20 | R4 | Round 4 contract written: 35 endpoints (cookbooks, event notifications, recipe actions, household self-service, invitations, webhooks). Findings: repos here are scoped by group **and** household, except cookbooks which deliberately widen to the group; `GET /cookbooks/{item_id}` takes `UUID4 \| str` while `PUT`/`DELETE` on the same path take a plain `str`, so a malformed id is a 404 and never a 422; that route's 404 has **no** detail body, unlike the `HttpRepo` shape; two notification routes and two webhook routes answer 204 or a bare `null`; `appriseUrl` is write-only and a null in an update means "keep the stored one"; `GET /invitations` is admin-only by an explicit check and returns a bare array; `PUT /preferences` is the only route gated on `can_manage_household` rather than `can_manage`; the email-invitation route catches every error and answers 200 with `success:false`. Four empty tables in this database make every list endpoint a zero-item envelope. No PHP written |
+
+| 2026-10-11 ~03:30 | Gate 4 | Operator answered "继续"; gate 4 passed unchanged, agent-run as D7a |
+| 2026-10-11 ~03:55 | R4 | 35 routes written. Self-check: first pass **17 identical, 20 differing** with two real status mismatches, both on `/households/cookbooks/{item_id}`, and both corrected in the contract afterwards: `PUT` with a non-UUID id and a valid body is a **500**, because `HttpRepo.update_one` calls `repo.get_one` outside its try block and the `GUID` type's `ValueError` escapes; `DELETE` with a non-UUID is a **400** and with a valid-but-missing UUID a **404**, both through `handle_exception` and both carrying `"An unexpected error occurred"` rather than `"Not found."`. One path, three distinct 404 bodies. None of this is visible from the route signature — it was measured |
+| 2026-10-11 ~04:00 | R4 | **After round 4: 103/265** (R1 33/33, R2 2/83, R3 40/73, R4 28/76) — `results/p4-after-round4.txt`. All 34 round 4 requests PASS; the 29 remaining `/api/households` failures are all shopping lists and meal plans, which are round 5. `dev/data/mealie.db` sha unchanged. Caveat for the report: `cookbooks`, `webhook_urls`, `group_events_notifiers` and `recipe_actions` are empty in this database, so the item shapes in those four collections are written from the schemas and are **not** confirmed against a live response — only their envelopes, statuses and permission paths are |
+
 ## Results so far
 
 | Label | Score | R1 | R2 | R3 | R4 |
@@ -117,6 +124,7 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | `p1-after-round1` — app, auth, validators, utils | 27/265 | 16/33 | 2/83 | 8/73 | 1/76 |
 | `p2-after-round2` — users | 44/265 | 33/33 | 2/83 | 8/73 | 1/76 |
 | `p3-after-round3` — groups | 71/265 | 33/33 | 2/83 | 8/73 | 28/76 |
+| `p4-after-round4` — households core | 103/265 | 33/33 | 2/83 | 40/73 | 28/76 |
 
 Region labels are W5's four areas, kept unchanged in `measure.sh` so the two workflows' breakdowns
 line up. They do not correspond to W3's rounds.
