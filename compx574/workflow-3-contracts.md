@@ -19,6 +19,10 @@ Conventions used throughout:
   `alias_generator=camelize`, so schemas inheriting it serialize **camelCase**. Schemas inheriting
   plain `pydantic.BaseModel` serialize their field names **unchanged**. Which base a schema uses is
   stated per endpoint below, because the two cases are mixed inside this round.
+- **Error bodies, measured against the oracle** — unknown route `404 {"detail":"Not Found"}`;
+  wrong method `405 {"detail":"Method Not Allowed"}`; failed `get_current_user`
+  `401 {"detail":"Could not validate credentials"}` with header `www-authenticate: Bearer`;
+  unhandled exception `500` with Starlette's plain-text `Internal Server Error`.
 - **422 body** — `mealie/routes/handlers.py:18-29` registers the debug validation handler only when
   `PRODUCTION` is false (or `TESTING`). The oracle runs with `PRODUCTION=False`, so a request-validation
   failure returns `{"status_code": 422, "message": "<str(exc)>", "data": null}`. The `message` text is
@@ -237,7 +241,9 @@ All five take their input as **required query parameters**; a missing one is a 4
 (`mealie/repos/repository_household.py:69-71`) opens with `if not self.group_id: raise
 Exception("group_id not set")`. The exception is unhandled, so every call to
 `/api/validators/household` — any name, existing or not — is a **500**, never a
-`ValidationResponse`. This is an upstream defect in Mealie, not a scoring artefact. PHP reproduces the
+`ValidationResponse`. Because the exception is unhandled, Starlette returns its own plain-text body
+`Internal Server Error` with `content-type: text/plain; charset=utf-8`, **not** a JSON `detail`
+object (verified against the oracle). This is an upstream defect in Mealie, not a scoring artefact. PHP reproduces the
 500 and this contract records it so that the matching 500 is not mistaken for a PHP bug.
 
 **1.15 `group_id` is typed `UUID4`**, so FastAPI rejects a missing, malformed or non-v4 value with a
@@ -261,7 +267,8 @@ leading/trailing hyphens stripped) because the lookup is on `recipes.slug` scope
   does not name it (log D5).
 - **Query** — `token`, optional (`validate_file_token`, `dependencies.py:178`).
 - **Order of checks**, all from `dependencies.py:178-205` then the handler:
-  1. no `token` → **400**, empty detail
+  1. no `token` → **400** `{"detail": "Bad Request"}` (FastAPI fills an omitted detail with the
+     status phrase; verified against the oracle)
   2. token fails HS256 decode, or has no usable `file` claim → **401**
      `{"detail": "could not validate file token"}`
   3. the path in the claim does not exist → **400**
