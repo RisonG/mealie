@@ -16,6 +16,10 @@ class UserTokensController extends Controller
     /** api_tokens.py:21 — 201 with LongLiveTokenCreateResponse (user.py:44). */
     public function create(Request $request): JsonResponse
     {
+        if (Errors::hasNonObjectBody($request)) {
+            return Errors::bodyNotAnObject();
+        }
+
         $body = $request->json()->all();
         if (! is_array($body) || ! isset($body['name']) || ! is_string($body['name'])) {
             return Errors::unprocessable("1 validation error: {'type': 'missing', 'loc': ('body', 'name'), 'msg': 'Field required', 'input': None}");

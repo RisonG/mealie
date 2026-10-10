@@ -19,6 +19,14 @@ Conventions used throughout:
   `alias_generator=camelize`, so schemas inheriting it serialize **camelCase**. Schemas inheriting
   plain `pydantic.BaseModel` serialize their field names **unchanged**. Which base a schema uses is
   stated per endpoint below, because the two cases are mixed inside this round.
+- **Request validation always precedes the handler, and therefore every permission check.**
+  FastAPI parses and validates path parameters and the request body before calling the function;
+  `self.checks.can_manage()`, `assert_user_change_allowed` and every other authorization test live
+  *inside* it. So a non-v4 UUID in the path, or a body that is not an object of the right shape, is
+  a **422 even for a caller who would have been refused with a 403** — and `parity.hurl` leans on
+  exactly this, sending an all-zero UUID (not a valid v4) and a scalar body of `0`. Writing the
+  permission check first is the natural mistake and gives the wrong status. Round 3 was scored
+  twice because of it: 69/265 with the checks in the wrong order, 71/265 with them right.
 - **Error bodies, measured against the oracle** — unknown route `404 {"detail":"Not Found"}`;
   wrong method `405 {"detail":"Method Not Allowed"}`; failed `get_current_user`
   `401 {"detail":"Could not validate credentials"}` with header `www-authenticate: Bearer`;
@@ -539,3 +547,260 @@ Two facts that apply to the whole module:
 Seven endpoints write: §2.6, §2.7, §2.10, §2.11, §2.12 (success path), §2.15, §2.16, §2.17. The
 round's self-check exercises their rejection paths only, and `dev/data/mealie.db` is compared
 against `dev/data/mealie.w3-snapshot.db` after the run.
+
+---
+
+## Round 3 — `groups`
+
+27 endpoints from `mealie/routes/groups/`. Unlike round 2, every router here carries its full prefix
+(`/groups/...`) and `mealie/routes/groups/__init__.py:13` includes them without adding one, so the
+paths are read straight off each `APIRouter(prefix=...)`.
+
+Four facts that apply to the whole module:
+
+- **Authentication comes from the controller class, not the router.** Four of these files use a
+  plain `APIRouter`, but every controller subclasses `BaseUserController`
+  (`mealie/routes/_base/base_controllers.py:132`), whose `user: PrivateUser = Depends(get_current_user)`
+  applies to every route on the controller. So **all 27 require a user**; the router type is not the
+  signal.
+- **`self.repos` is scoped to the caller's group** (`base_controllers.py:155-157` →
+  `AllRepositories(..., group_id=self.user.group_id, ...)`). Every query below is implicitly
+  filtered by `group_id`. In this database all five users are in `Home`, so group scoping cannot be
+  observed from the row counts alone — it still has to be written.
+- **JSON encoding.** FastAPI serializes with `ensure_ascii=False` and does not escape forward
+  slashes. PHP's `json_encode` escapes both by default, which makes every pagination guide differ
+  (`\/groups\/labels`). `JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE` is applied once, as
+  response middleware, rather than at each call site.
+- **Two different 404 bodies.** An unrouted path is `{"detail": "Not Found"}`, but a route that
+  found nothing through `HttpRepo.get_one` (`mealie/routes/_base/mixins.py:110-113`) is
+  `{"detail": {"message": "Not found.", "error": true, "exception": null}}`. Labels, reports and AI
+  providers all use the second; `/groups/members/{x}` and `/groups/households/{x}` raise their own
+  bare-string details instead. Three shapes in one module.
+- **The pagination envelope is snake_case and its contents are camelCase.** `PaginationBase`
+  (`mealie/schema/response/pagination.py:51`) is a plain `BaseModel`, so the keys are `page`,
+  `per_page`, `total`, `total_pages`, `items`, `next`, `previous`. The objects inside `items` are
+  `MealieModel`s and are camelCased. Both appear in one response. Query parameters go the other
+  way: `PaginationQuery` (`pagination.py:46`) is a `MealieModel`, so clients send `perPage`,
+  `orderBy`, `orderDirection`, `queryFilter`, `orderByNullPosition`, `paginationSeed`.
+- **`next`/`previous` have an exact, reproducible shape** (`pagination.py:60-94`, verified):
+  `<route>?orderBy=None&orderByNullPosition=None&orderDirection=desc&queryFilter=None&paginationSeed=None&page=<n>&perPage=<n>`.
+  Two details matter. The route comes from `router.url_path_for(...)` on the **sub-router**, so it
+  has **no `/api` prefix** — `/groups/labels`, not `/api/groups/labels`. And unset parameters are
+  Python `None` passed through `urlencode`, so they appear as the literal string `None`, not as
+  empty or omitted. `next` is null on the last page, `previous` on the first.
+
+**The token `run.sh` mints belongs to `bob`, whose five permission bits are all 0**
+(`admin`, `can_manage`, `can_invite`, `can_organize`, `can_manage_household`). Nine of the 27 call
+`self.checks.can_manage()` (`mealie/routes/_base/checks.py:28-31`), which raises a bare
+**403 `{"detail":"Forbidden"}`**. They are still implemented; the check is what is being reproduced,
+not the status.
+
+**Corrected against the oracle: the 403 does not always win.** `checks.can_manage()` runs *inside*
+the handler, and FastAPI validates the request body *before* calling it. So on the five guarded
+routes that take a body, a malformed body is a **422 even for a caller who would have been refused
+with a 403**. Only the three guarded routes with no body (`GET .../settings`,
+`GET .../providers/{id}`, `DELETE .../providers/{id}`) answer 403 unconditionally. Writing the
+permission check first is the natural mistake here and produces the wrong status on five of nine.
+
+### 3.1–3.2 Group AI provider settings
+
+`controller_group_ai_providers.py:21`, `APIRouter(prefix="/groups/ai-providers/settings")`,
+`GroupAIProviderSettingsController(BaseUserController)`.
+
+| # | Route | Python | Behaviour |
+|---|---|---|---|
+| 3.1 | `GET /api/groups/ai-providers/settings` | `:27` | `checks.can_manage()` then `group_ai_provider_settings.get_one(group_id)` |
+| 3.2 | `PUT /api/groups/ai-providers/settings` | `:33` | `checks.can_manage()` then update |
+
+- **Schema** — `AIProviderSettingsOut`, a `MealieModel`. As seen nested in `GET /groups/self`:
+  `defaultProviderId`, `audioProviderId`, `imageProviderId`, `providers` (each `{id, name}`),
+  `aiEnabled`, `audioProviderEnabled`, `imageProviderEnabled`.
+- **Who** — `can_manage`. For `bob`: **403**.
+- **IDs** — provider ids dashed.
+- **Not implemented** — nothing; both reproduce the permission check and, for a permitted caller,
+  the read/update. **API keys are never echoed** — `AIProviderOut` is what the settings embed, and
+  the settings response carries only `{id, name}` per provider.
+
+### 3.3–3.8 Group AI providers
+
+`controller_group_ai_providers.py:22`, `APIRouter(prefix="/groups/ai-providers/providers")`. All six
+call `checks.can_manage()` first, so all six are **403** for `bob`.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 3.3 | `POST /api/groups/ai-providers/providers` | `:46` | create; body `AIProviderCreate` |
+| 3.4 | `POST /api/groups/ai-providers/providers/test` | `:52` | tests an **unsaved** configuration; builds an ephemeral `AIProviderOut` with a fresh uuid4 that is never persisted |
+| 3.5 | `POST /api/groups/ai-providers/providers/{provider_id}/test` | `:70` | tests a saved provider, optionally with unsaved `overrides`. An `overrides.apiKey` of `""` means *keep the stored key* (`:84`), not *test with an empty key* |
+| 3.6 | `GET /api/groups/ai-providers/providers/{provider_id}` | `:100` | |
+| 3.7 | `PUT /api/groups/ai-providers/providers/{provider_id}` | `:106` | |
+| 3.8 | `DELETE /api/groups/ai-providers/providers/{provider_id}` | `:112` | returns the deleted provider |
+
+- **Route order** — `/test` is a literal path that must be declared before `/{provider_id}`, and
+  `/{provider_id}/test` before `/{provider_id}`. FastAPI prefers literals regardless of order;
+  Laravel does not.
+- **`provider_id` is `UUID4`** → a non-v4 value is a **422** before the handler, which is what the
+  zero UUID in the shared check produces.
+- **Not implemented** — the outbound call in 3.4 and 3.5. `OpenAIService.test_connection` reaches a
+  third-party API; the PHP implements the permission check and the 422/404 paths and does not make
+  the request. Recorded, not stubbed as a fake success.
+
+### 3.9 `GET /api/groups/households`
+
+- **Python** — `controller_group_households.py:14`, `UserAPIRouter(prefix="/groups/households")`.
+- **Schema** — `PaginationBase[HouseholdSummary]`. An item is
+  `{groupId, name, id, slug, preferences{...}}`; `preferences` is itself camelCase and carries its
+  own `id` (`privateHousehold`, `showAnnouncements`, `lockRecipeEditsFromOtherHouseholds`,
+  `firstDayOfWeek`, `recipePublic`, `recipeShowNutrition`, `recipeShowAssets`,
+  `recipeLandscapeView`, `recipeDisableComments`, `id`).
+- **Who** — any authenticated user; no `checks` call.
+- **Not implemented** — nothing.
+
+### 3.10 `GET /api/groups/households/{household_slug}`
+
+- **Python** — `controller_group_households.py:21`. The parameter is typed `str` and resolved by
+  `get_by_slug_or_id`, so **either** a slug or a UUID works and a malformed value is a 404 rather
+  than a 422.
+- **Not found** — **404** `{"detail": "Household not found"}` — a bare string detail.
+- **Not implemented** — nothing.
+
+### 3.11 `GET /api/groups/self`
+
+- **Python** — `controller_group_self_service.py:25`, `UserAPIRouter(prefix="/groups")`.
+- **Schema** — `GroupSummary`: `{name, id, slug, preferences{...}, aiProviderSettings{...}}`.
+  Note this response embeds the AI provider settings that §3.1 guards behind `can_manage` — here
+  they are returned to any member of the group, with no permission check.
+- **Not implemented** — nothing.
+
+### 3.12 `GET /api/groups/members`
+
+- **Python** — `controller_group_self_service.py:30`.
+- **Schema** — `PaginationBase[UserSummary]`; an item is `{id, groupId, householdId, username,
+  fullName}` — five keys only, no email and no permission bits.
+- **Route for the guides** — `/groups/members`.
+- **Not implemented** — nothing.
+
+### 3.13 `GET /api/groups/members/{username_or_id}`
+
+- **Python** — `controller_group_self_service.py:37`. The handler tries `UUID(username_or_id)` and
+  looks up by `id` on success, by `username` on `ValueError` (`:41-47`) — so **any** non-UUID string
+  is treated as a username rather than rejected, and note it accepts any UUID version here, unlike
+  the `UUID4`-typed parameters elsewhere.
+- **Not found** — **404** `{"detail": "User Not Found"}`, a bare string detail.
+- **Scoping** — the lookup goes through the group-scoped repo, so a user in another group is a 404.
+- **Not implemented** — nothing.
+
+### 3.14 `GET /api/groups/preferences`
+
+- **Python** — `controller_group_self_service.py:53`. No permission check.
+- **Schema** — `ReadGroupPreferences`: `{privateGroup, showAnnouncements, groupId, id}`.
+- **Not implemented** — nothing.
+
+### 3.15 `PUT /api/groups/preferences`
+
+- **Python** — `controller_group_self_service.py:57`. `checks.can_manage()` → **403** for `bob`.
+- **Body** — `UpdateGroupPreferences`, camelCase.
+- **Side effect** — writes `group_preferences`. Excluded from the self-check's success path.
+- **Not implemented** — nothing.
+
+### 3.16 `GET /api/groups/storage`
+
+- **Python** — `controller_group_self_service.py:62` → `GroupService.calculate_group_storage()`.
+- **Schema** — `GroupStorage`: `{usedStorageBytes, usedStorageStr, totalStorageBytes,
+  totalStorageStr}`. `totalStorageBytes` is a fixed quota (524288000 here);
+  `usedStorageBytes` is the size of the group's directory on disk, and the `*Str` fields are
+  human-readable renderings of the same numbers.
+- **Where the bytes come from, corrected against the oracle** — not a `groups/` directory.
+  `GroupService.calculate_group_storage` (`mealie/services/group_services/group_service.py:57-74`)
+  sums `get_dir_size()` over `<data>/recipes/<recipe id>` for **every recipe in the group, across
+  all households**, with the id in dashed form. `get_dir_size`
+  (`mealie/pkgs/stats/fs_stats.py:25-40`) counts the directory entry itself as well as its
+  contents, so a group whose recipe directories are empty still reports a few hundred bytes (416
+  here). `totalStorageBytes` is the fixed `ALLOWED_SIZE`, 524288000.
+- **`*Str` formatting** — `pretty_size` (`fs_stats.py:8-22`) is `round(value, 2)` rendered by
+  Python's float repr, which always keeps a decimal place: `500.0 MB`, not `500 MB`. Below 1024 it
+  is `<n> bytes` with no unit scaling.
+- **Not implemented** — nothing.
+
+### 3.17 `POST /api/groups/migrations`
+
+- **Python** — `controller_migrations.py:30`, `UserAPIRouter(prefix="/groups/migrations")`.
+- **Body** — `multipart/form-data`: `archive` (file, required), `migration_type` (required, one of
+  the `SupportedMigrations` values), `add_migration_tag` (bool, default false). A missing file or
+  type is a **422** before the handler.
+- **Not implemented** — every migrator (Chowdown, CopyMeThat, Mealie alpha, Nextcloud, Paprika,
+  Tandoor, PlanToEat, …). The PHP implements the multipart validation and stops; it does not unpack
+  archives or write recipes. This is a large deliberate gap and is the single biggest "not
+  implemented" in the round.
+
+### 3.18–3.20 Group reports
+
+`controller_group_reports.py:13`, `APIRouter(prefix="/groups/reports")`,
+`GroupReportsController(BaseUserController)` — authenticated, no `checks` call.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 3.18 | `GET /api/groups/reports` | `:35` | optional `report_type` query, filtered on `category`; returns a **bare JSON array** of `ReportSummary`, not a pagination envelope. `[]` on this database |
+| 3.19 | `GET /api/groups/reports/{item_id}` | `:39` | `item_id` is `UUID4`; unknown id → 404 via `HttpRepo.get_one` |
+| 3.20 | `DELETE /api/groups/reports/{item_id}` | `:43` | success → `SuccessResponse` `{"message": "<group.report-deleted>", "error": false}`; any failure → **500** `{"detail": {"message": "Failed to delete report", "error": true, "exception": null}}` |
+
+- **3.20's failure mode is a 500, not a 404.** `delete_one` on a missing id raises, and the handler
+  catches every exception and answers 500. Deleting an id that does not exist is therefore a 500
+  here, where §3.19 on the same id is a 404.
+- **Not implemented** — nothing.
+
+### 3.21–3.25 Multi-purpose labels
+
+`controller_labels.py:21`, `APIRouter(prefix="/groups/labels", route_class=MealieCrudRoute)`,
+`MultiPurposeLabelsController(BaseCrudController)` — authenticated, **no permission check**, so
+`bob` can create and delete labels.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 3.21 | `GET /api/groups/labels` | `:44` | `PaginationBase[MultiPurposeLabelSummary]`, plus an optional `search` query. Item: `{name, color, groupId, id}` |
+| 3.22 | `POST /api/groups/labels` | `:55` | body `MultiPurposeLabelCreate`; returns `MultiPurposeLabelOut` |
+| 3.23 | `GET /api/groups/labels/{item_id}` | `:71` | `UUID4`; unknown → 404 |
+| 3.24 | `PUT /api/groups/labels/{item_id}` | `:75` | |
+| 3.25 | `DELETE /api/groups/labels/{item_id}` | `:87` | returns the deleted label |
+
+- **`MealieCrudRoute`** (`mealie/routes/_base/routers.py:27-50`) adds a `last-modified` header and
+  `Cache-Control: no-cache, no-store, must-revalidate` whenever the response body is an object with
+  an `updatedAt` key. `MultiPurposeLabelOut` has no `updatedAt`, so on these five routes the wrapper
+  is inert — worth stating so the headers are not added speculatively.
+- **Side effects** — 3.22, 3.24 and 3.25 write. Their rejection paths are safe; the success paths
+  are excluded from the self-check.
+- **Not implemented** — the `label_created` / `label_updated` / `label_deleted` event-bus dispatches
+  (`controller_labels.py:62-68`, `:78-84`, `:91-97`). They notify webhooks and Apprise; no part of
+  the event bus is implemented in this rewrite. The HTTP response is unaffected.
+
+### 3.26–3.27 Seeders
+
+`controller_seeder.py:11`, `APIRouter(prefix="/groups/seeders")` — authenticated, no permission
+check.
+
+| # | Route | Python |
+|---|---|---|
+| 3.26 | `POST /api/groups/seeders/foods` | `:28` |
+| 3.27 | `POST /api/groups/seeders/units` | `:32` |
+
+- **Body** — `SeederConfig`: `{"locale": str}`. Missing body → **422**.
+- **Responses** — success `SuccessResponse` `{"message": "Seeding Successful", "error": false}`;
+  any exception → **500** `{"detail": {"message": "Seeding Failed", "error": true, "exception": null}}`.
+- **Not implemented** — the seeding itself, which bulk-inserts the packaged food and unit lists for
+  a locale. Both endpoints implement the body validation and stop before writing; a request that
+  would have seeded is reported rather than answered with a false success. This also protects the
+  shared database, which these two would otherwise fill with hundreds of rows.
+
+### Out of scope for round 3
+
+- `mealie/routes/households/` — round 4 and 5, including its own `/households/...` preferences and
+  members, which are distinct from the group-level ones here.
+- The event bus (webhooks, Apprise) behind labels and other writes.
+- Third-party AI calls (§3.4, §3.5) and every data migrator (§3.17).
+- Seeding data (§3.26, §3.27).
+
+### Database safety for this round
+
+Writing endpoints: §3.2, §3.3, §3.7, §3.8, §3.15, §3.20, §3.22, §3.24, §3.25, and §3.26/§3.27 had
+they been implemented. Nine of them are `can_manage`-guarded and so are 403 for the parity token.
+The self-check exercises rejection paths only, and `dev/data/mealie.db` is compared against
+`dev/data/mealie.w3-snapshot.db` after the run.

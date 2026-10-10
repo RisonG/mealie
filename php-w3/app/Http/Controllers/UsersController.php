@@ -69,6 +69,10 @@ class UsersController extends Controller
      */
     public function updatePassword(Request $request): JsonResponse
     {
+        if (Errors::hasNonObjectBody($request)) {
+            return Errors::bodyNotAnObject();
+        }
+
         $user = $request->attributes->get('mealie_user');
         $body = $request->json()->all();
 
@@ -95,6 +99,10 @@ class UsersController extends Controller
     /** crud.py:65 — the full assert_user_change_allowed, unlike the self-only callers. */
     public function updateUser(Request $request, string $itemId): JsonResponse
     {
+        if (Errors::hasNonObjectBody($request)) {
+            return Errors::bodyNotAnObject();
+        }
+
         if (! Guid::isV4($itemId)) {
             return Errors::unprocessable("1 validation error: {'type': 'uuid_parsing', 'loc': ('path', 'item_id'), 'msg': 'Input should be a valid UUID', 'input': '$itemId'}");
         }

@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Middleware\MatchJsonEncoding;
 use App\Http\Middleware\MealieAuth;
 use App\Support\Errors;
 use Illuminate\Foundation\Application;
@@ -20,6 +21,9 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias(['mealie' => MealieAuth::class]);
+
+        // Match FastAPI's JSON encoding on every API response.
+        $middleware->api(prepend: [MatchJsonEncoding::class]);
 
         // FastAPI has no CSRF token and no session for the API; nothing here should add one.
         $middleware->api(remove: []);

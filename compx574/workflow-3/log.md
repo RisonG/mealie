@@ -101,6 +101,14 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | 2026-10-11 ~01:25 | R2 | Self-check (`sandbox/compare.sh`, 31 requests, bodies included — the script gained JSON-body support this round): **19 identical, 12 differing**. Every status matches; all 12 differences are the free-text `message` of a 422, where Python appends the oracle's own source path and pydantic's `ctx`, and reports every error in a body while this implementation reports the first. `GET /users/self` matches byte for byte, which exercises the camelCase mapping, the `MEALIE → Mealie` enum conversion, the group/household joins and the token list. One real defect was found and fixed: Laravel renders `JsonResponse(null)` as `{}`, so `forgot-password` needed an explicit `null` body |
 | 2026-10-11 ~01:30 | R2 | **After round 2: 44/265** (R1 **33/33**, R2 2/83, R3 8/73, R4 1/76) — `results/p2-after-round2.txt`. All 18 `/api/users` requests PASS. R1 is now complete; W5 finished that region at 28/33. `dev/data/mealie.db` sha unchanged, so none of the round's seven writing endpoints was reached |
 
+| 2026-10-11 ~01:40 | Gate 3 | Operator answered "继续"; gate 3 passed unchanged, agent-run as D7a |
+| 2026-10-11 ~01:55 | R3 | Round 3 contract written: 27 endpoints from `mealie/routes/groups/`. Findings: authentication here comes from the **controller class** (`BaseUserController`), not the router type — four files use a plain `APIRouter` and are still authenticated; the pagination envelope is snake_case (`per_page`, `total_pages`) while its `items` are camelCase, in the same response; `next`/`previous` are built from `url_path_for` on the sub-router so they carry **no `/api` prefix**, and unset parameters appear as the literal string `None`; `bob`'s five permission bits are all 0, so the nine `can_manage`-guarded endpoints are 403 for the parity token; `DELETE /groups/reports/{id}` answers **500** for an id that `GET` on the same path answers 404 for, because the handler catches every exception. No PHP written |
+
+| 2026-10-11 ~02:10 | Gate 3 | Operator answered "继续"; gate 3 passed unchanged, agent-run as D7a |
+| 2026-10-11 ~02:40 | R3 | 27 routes written, plus `App\\Support\\Pagination` (the envelope, the `page_all` semantics of `repository_generic.py:321-412`, and the guide URLs) which rounds 4-9 reuse. Self-check: first pass **20 identical, 15 differing** with four real defects, all fixed: (a) PHP escapes `/` and non-ASCII in JSON while FastAPI does neither, which broke every pagination guide — fixed once as response middleware rather than at each call site; (b) `GET /groups/storage` sums `<data>/recipes/<id>` over the group's recipes, **not** a `groups/` directory, and `get_dir_size` counts the directory entry itself; (c) a route that found nothing through `HttpRepo.get_one` returns an `ErrorResponse` object under `detail`, not the bare `"Not Found"` string an unrouted path gets — three different 404 shapes in this one module; (d) body validation precedes the in-handler permission check. Second pass: **26 identical, 9 differing**, all 9 only the free-text `message` of a 422 |
+| 2026-10-11 ~02:50 | R3 | First score **69/265** with two failures, both the same root cause as (d) but for **path** parameters and for a scalar body: `parity.hurl` sends an all-zero UUID, which is not a valid v4, and a body of `0`. The self-check had missed them because its request list used a valid-v4 zero UUID. Generalized to "all request validation precedes every permission check", applied to 12 handlers across rounds 1-3, and promoted to the contract's conventions for the later rounds |
+| 2026-10-11 ~02:55 | R3 | **After round 3: 71/265** (R1 33/33, R2 2/83, R3 8/73, R4 28/76) — `results/p3-after-round3.txt`. All 27 `/api/groups` requests PASS, R1 still complete, no regression in rounds 1-2. `dev/data/mealie.db` sha unchanged |
+
 ## Results so far
 
 | Label | Score | R1 | R2 | R3 | R4 |
@@ -108,6 +116,7 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | `p0-floor` — skeleton, no routes | 12/265 | 2/33 | 2/83 | 7/73 | 1/76 |
 | `p1-after-round1` — app, auth, validators, utils | 27/265 | 16/33 | 2/83 | 8/73 | 1/76 |
 | `p2-after-round2` — users | 44/265 | 33/33 | 2/83 | 8/73 | 1/76 |
+| `p3-after-round3` — groups | 71/265 | 33/33 | 2/83 | 8/73 | 28/76 |
 
 Region labels are W5's four areas, kept unchanged in `measure.sh` so the two workflows' breakdowns
 line up. They do not correspond to W3's rounds.

@@ -11,6 +11,10 @@ class UserRegistrationController extends Controller
 {
     public function register(Request $request): JsonResponse
     {
+        if (Errors::hasNonObjectBody($request)) {
+            return Errors::bodyNotAnObject();
+        }
+
         $body = $request->json()->all();
         if (! is_array($body)) {
             $body = [];

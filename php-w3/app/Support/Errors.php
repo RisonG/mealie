@@ -26,6 +26,40 @@ class Errors
         return self::detail(404, 'Not Found');
     }
 
+    /**
+     * A request body that is not a JSON object.
+     *
+     * Every route whose handler takes a pydantic model rejects a scalar or a list with this 422,
+     * and it happens during request validation — so it precedes permission checks, which live
+     * inside the handler.
+     */
+    public static function bodyNotAnObject(): JsonResponse
+    {
+        return self::unprocessable("1 validation error: {'type': 'model_attributes_type', 'loc': ('body',), 'msg': 'Input should be a valid dictionary or object to extract fields from'}");
+    }
+
+    /** True when the request carried a body that is not a JSON object. */
+    public static function hasNonObjectBody(\Illuminate\Http\Request $request): bool
+    {
+        $raw = $request->getContent();
+        if ($raw === '') {
+            return false;
+        }
+
+        $decoded = json_decode($raw, true);
+
+        return ! is_array($decoded) || array_is_list($decoded) && $decoded !== [];
+    }
+
+    /**
+     * The 404 raised by HttpRepo.get_one (mealie/routes/_base/mixins.py:110-113) — an ErrorResponse
+     * object under detail, not the bare "Not Found" string an unrouted path gets.
+     */
+    public static function repoNotFound(): JsonResponse
+    {
+        return new JsonResponse(['detail' => ['message' => 'Not found.', 'error' => true, 'exception' => null]], 404);
+    }
+
     public static function methodNotAllowed(): JsonResponse
     {
         return self::detail(405, 'Method Not Allowed');
