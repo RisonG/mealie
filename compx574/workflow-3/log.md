@@ -133,6 +133,12 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | 2026-10-11 ~06:30 | R6 | **After round 6: 152/265** (R1 33/33, R2 **22/83**, R3 69/73, R4 28/76) — `results/p6-after-round6.txt`. Every round 6 endpoint passes. One adjacent failure, `GET /api/recipes/shared/{token_id}`, belongs to round 7's `shared_routes.py` and will be fixed when that route is declared ahead of `/{slug}`. `dev/data/mealie.db` sha unchanged |
 | — | note | Limitation of `sandbox/compare.sh` worth recording: it compares only the first 400 bytes of each body, so a difference beyond that is invisible to it. The field-by-field diff used on the recipe list this round is the way to check a large response, and the `identical` count should not be read as byte-equality for long bodies |
 
+| 2026-10-11 ~06:40 | Gate 7 | Operator answered "继续"; gate 7 passed unchanged, agent-run as D7a |
+| 2026-10-11 ~06:55 | R7 | Round 7 contract written: 24 endpoints. Three findings measured rather than read: `/api/recipes/shared/{token_id}` is **anonymous** — `shared_routes.py` uses a plain `APIRouter` and module-level functions, so no user dependency is inherited, and an unauthenticated request gets the 404 `"Token Not Found"` rather than a 401; `GET /api/recipes/{slug}/comments` answers **500** for an unknown slug because `comments.py:13-14` dereferences `recipe.id` with no null check; and `GET /api/recipes/exports` returns the real template list `{"json":["raw"],"zip":["zip"]}`. Four routes turn out to be implementable exactly rather than reported as unimplemented: `/recipes/exports`, `/bulk-actions/export`, `/bulk-actions/export/purge` and the comments route. No PHP written |
+
+| 2026-10-11 ~07:10 | R7 | 24 routes written. A PHP parse error cost the first self-check run: `*/stream` inside a docblock closes the comment, which turned ten routes into 500s. Every controller and support file is now linted with `php -l` before scoring. Self-check after that: four status mismatches, all resolved by measuring instead of assuming — `/create/ai` and `/create/ai/stream` take **Form** fields rather than a JSON body, so a JSON payload is ignored and the handler runs, answering 400 (or a 200 SSE `event: error`) with "No content, images, or URL were provided"; `/bulk-actions/export/{id}/download` answers 404 `"export not found"`; and `/recipes/{slug}/exports?template_name=raw` is simply the recipe JSON, byte-identical to `GET /recipes/{slug}` apart from its four-space indentation. All four became exact implementations rather than 501s |
+| 2026-10-11 ~07:20 | R7 | **After round 7: 172/265** (R1 33/33, R2 **42/83**, R3 69/73, R4 28/76) — `results/p7-after-round7.txt`. **All 42 `/api/recipes` requests pass.** Self-check 11 identical, 17 differing, 0 status mismatches. `dev/data/mealie.db` sha unchanged |
+
 ## Results so far
 
 | Label | Score | R1 | R2 | R3 | R4 |
@@ -144,6 +150,7 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | `p4-after-round4` — households core | 103/265 | 33/33 | 2/83 | 40/73 | 28/76 |
 | `p5-after-round5` — shopping and meal plans | 132/265 | 33/33 | 2/83 | 69/73 | 28/76 |
 | `p6-after-round6` — recipe CRUD, timeline, bulk actions | 152/265 | 33/33 | 22/83 | 69/73 | 28/76 |
+| `p7-after-round7` — recipe import, media, exports, shared | 172/265 | 33/33 | 42/83 | 69/73 | 28/76 |
 
 Region labels are W5's four areas, kept unchanged in `measure.sh` so the two workflows' breakdowns
 line up. They do not correspond to W3's rounds.

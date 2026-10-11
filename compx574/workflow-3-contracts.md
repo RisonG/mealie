@@ -1289,3 +1289,150 @@ list is checked against its schema for a required field first: `CreateRecipe` re
 `RecipeTimelineEventIn` requires `recipeId` and `subject`, and the three `Assign*` bodies require
 `recipes`, so an empty object is a 422 on all of them and no row is created. `dev/data/mealie.db` is
 compared against `dev/data/mealie.w3-snapshot.db` after the run.
+
+---
+
+## Round 7 — recipe import, images, assets, exports, shared links, comments
+
+24 endpoints: 15 more from `recipe_crud_routes.py`, 2 from `exports.py`, 2 from `shared_routes.py`,
+1 from `comments.py`, and the 4 export routes on `bulk_actions.py`.
+
+### Three things measured against the oracle
+
+- **`/api/recipes/shared/{token_id}` is anonymous.** `shared_routes.py:17` is a plain `APIRouter()`
+  and `:22`/`:42` are **module-level functions**, not controller methods, so neither inherits a user
+  dependency. Verified: a request with no `Authorization` header returns **404**
+  `{"detail":{"message":"Token Not Found","error":true,"exception":null}}`, not a 401. Both share
+  routes are public by design — they are the share-link feature.
+- **`GET /api/recipes/{slug}/comments` is a 500 for an unknown slug.** `comments.py:13-14` does
+  `recipe = self.repos.recipes.get_one(slug)` and then `recipe.id` with no null check, so a missing
+  recipe raises `AttributeError` and Starlette answers plain-text `Internal Server Error`. Verified.
+  A known slug returns `[]` here.
+- **`GET /api/recipes/exports` returns `{"json":["raw"],"zip":["zip"]}`** on this deployment —
+  the real template list from `TemplateService`, not an empty skeleton.
+
+### Route order
+
+`/recipes/shared/{token_id}` and `/recipes/exports` are literal second segments and must be
+declared **before** `/recipes/{slug}`; `/recipes/{slug}/exports` is a different route from
+`/recipes/exports`. `/recipes/create/*` and `/recipes/test-scrape-url` likewise precede `/{slug}`.
+
+### 7.1–7.10 Scraping and import
+
+All on `recipe_crud_routes.py`'s router.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 7.1 | `POST /api/recipes/test-scrape-url` | `:158` | body `ScrapeRecipeTest`; returns the raw scraped schema, or the **bare string** `"recipe_scrapers was unable to scrape this URL"`. A scrape timeout → **408** `ErrorResponse` `"Recipe Scraping Timed Out"` |
+| 7.2 | `POST /api/recipes/create/html-or-json` | `:184` | **201**, bare string slug. A body starting with `{` is converted from ld+json to HTML first |
+| 7.3 | `POST /api/recipes/create/html-or-json/stream` | `:200` | **SSE**, `text/event-stream` |
+| 7.4 | `POST /api/recipes/create/url` | `:213` | **201**, bare string slug |
+| 7.5 | `POST /api/recipes/create/url/stream` | `:226` | SSE |
+| 7.6 | `POST /api/recipes/create/ai` | `:380` | **201**, bare string slug. Every parameter is a **Form** field (`:383-387`), not a JSON body, so a JSON payload is ignored rather than rejected and the handler always runs |
+| 7.7 | `POST /api/recipes/create/ai/stream` | `:409` | SSE |
+| 7.8 | `POST /api/recipes/create/url/bulk` | `:451` | **202**, `{"reportId": "<uuid>"}` — the one import route that answers with an object |
+| 7.9 | `POST /api/recipes/create/zip` | `:470` | **201**, multipart `archive`, bare string slug |
+| 7.10 | `POST /api/recipes/create/image` | `:484` | **201**, deprecated and `include_in_schema=False`, so it is absent from the OpenAPI document but still routed. Multipart `images` (a list) plus `translateLanguage` as a **query** parameter |
+
+- **§7.6 and §7.7 have a reachable guard**, measured: with no content, images or URL they answer
+  before touching any AI provider. §7.6 is **400**
+  `{"detail":{"message":"No content, images, or URL were provided",…}}`; §7.7 is **200**
+  `text/event-stream` carrying `event: error` and that same message. Both are implemented; the
+  branches that would call a provider are not.
+- **§7.22 answers 404 `{"detail":"export not found"}`** for an unknown id — a bare string detail.
+  Implemented.
+- **The error path is shared**: `_create_recipe_from_web` yields SSE events, and the non-stream
+  variants turn an ERROR event into **400** `ErrorResponse` with the event's message, falling
+  through to **500** `"Unknown Error"` if neither DONE nor ERROR arrives (`:220-224`).
+- **Not implemented** — every one of these ten. They fetch third-party URLs, run
+  `recipe_scrapers`, call an AI provider, or unpack uploaded archives. The request validation is
+  implemented so that a malformed body is the same 422 the oracle gives; nothing is fetched,
+  parsed or written. The three `*/stream` routes would additionally need SSE, which is not
+  attempted.
+
+### 7.11–7.15 Images and assets
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 7.11 | `POST /api/recipes/{slug}/image` | `:782` | body `ScrapeRecipe` (a URL). Three distinct 400s: `"Url is not an image"`, `"Url is not from an allowed domain"`, `"Image could not be downloaded"` (`:789-806`) |
+| 7.12 | `PUT /api/recipes/{slug}/image` | `:812` | multipart: `image` bytes plus `extension` as a **form** field |
+| 7.13 | `DELETE /api/recipes/{slug}/image` | `:821` | `SuccessResponse` with the translated `recipe.recipe-image-deleted` |
+| 7.14 | `POST /api/recipes/{slug}/assets` | `:884` | multipart: `name`, `icon`, `extension` form fields and a `file` |
+| 7.15 | `POST /api/recipes/{slug}/assets/url` | `:896` | downloads an image to store as an asset; same `"Url is not an image"` / allowed-domain 400s |
+
+- **§7.11's third 400 is deliberate**, with a comment at `:800-801`: a failed download must not
+  leave the recipe claiming an image, or every render asks the media route for a missing file.
+- **Not implemented** — all five. They fetch URLs through the SSRF allow-list, re-encode images and
+  write to the recipe's data directory. Validation and the `handle_exceptions` mapping are
+  implemented.
+
+### 7.16–7.17 Exports
+
+`exports.py:13`, `UserAPIRouter(prefix="/recipes")` — it carries its own prefix, unlike the four
+files `__init__.py` adds one to.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 7.16 | `GET /api/recipes/exports` | `:21` | `FormatResponse`; **verified** `{"json":["raw"],"zip":["zip"]}` |
+| 7.17 | `GET /api/recipes/{slug}/exports` | `:25` | `template_name` is a **required query parameter**, so omitting it is a **422** before the handler. With `template_name=raw` the response is a `FileResponse` served as `application/json` |
+
+- §7.16 is implementable exactly: the template list is static for this deployment.
+- **§7.17 with `template_name=raw` is the recipe itself.** Verified: the response is the same JSON
+  as `GET /recipes/{slug}`, served as `application/json` with four-space indentation because
+  `TemplateService` writes it to a file and `FileResponse` serves that. Implemented exactly.
+- **Not implemented** — §7.17's other templates. The 422 for a missing `template_name` and the 404
+  for an unknown slug are implemented.
+
+### 7.18–7.19 Shared recipe links
+
+`shared_routes.py:17`, plain `APIRouter()`, included with `prefix="/recipes"`. **Anonymous.**
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 7.18 | `GET /api/recipes/shared/{token_id}` | `:22` | `token_id` is `UUID4`, so a non-v4 value is a **422**. An unknown or expired token → **404** `ErrorResponse` `"Token Not Found"`. An **expired** token is deleted as a side effect before the 404 (`:27-34`) |
+| 7.19 | `GET /api/recipes/shared/{token_id}/zip` | `:42` | calls §7.18 first, so it inherits the same 404 and 422, then zips the recipe with its original image |
+
+- **§7.18 writes** — it deletes expired tokens. On an unknown token nothing is deleted, which is the
+  only path reachable here.
+- **Not implemented** — §7.19's zip construction. §7.18 is implemented in full except that expired
+  tokens are not deleted; `recipe_share_tokens` is empty in this database, so neither path is
+  reachable with data.
+
+### 7.20 Recipe comments
+
+`comments.py:5`, `UserAPIRouter()` with no prefix, included with `prefix="/recipes"`.
+
+- **`GET /api/recipes/{slug}/comments`** (`:10`) — authenticated; returns a **bare array** of
+  `RecipeCommentOut`. An unknown slug is a **500**, as above. `recipe_comments` is empty here, so a
+  known slug returns `[]`.
+- **Not implemented** — nothing; both branches are reproduced, the 500 included.
+
+### 7.21–7.24 Bulk export
+
+`bulk_actions.py`, the remaining four routes.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 7.21 | `POST /api/recipes/bulk-actions/export` | `:60` | **202** |
+| 7.22 | `GET /api/recipes/bulk-actions/export/{export_id}/download` | `:65` | |
+| 7.23 | `GET /api/recipes/bulk-actions/export` | `:76` | bare array of `GroupDataExport`; **verified** `[]` |
+| 7.24 | `DELETE /api/recipes/bulk-actions/export/purge` | `:80` | **verified** `{"message":"0 exports deleted","error":false}` — the count is computed, and with no exports present nothing is written |
+
+- **Route order within this group**: `/export/purge` is a literal path that must precede
+  `/export/{export_id}/download`, and `/export` must not swallow either.
+- §7.23 and §7.24 are implementable exactly. **Not implemented** — §7.21's background zip build and
+  §7.22's file download.
+
+### Out of scope for round 7
+
+- Every outbound fetch: recipe scraping, AI providers, image downloads.
+- SSE in all three streaming variants.
+- Archive handling: zip import and zip export.
+- Image re-encoding and asset storage.
+
+### Database safety for this round
+
+The only writing path reachable without an outbound fetch is §7.18's expired-token deletion, and
+`recipe_share_tokens` is empty. §7.24 reports a count and deletes nothing when there is nothing to
+delete, which is the state here. Every probe body is checked against its schema for a required
+field first, per round 5's rule. `dev/data/mealie.db` is compared against the snapshot after the run.
