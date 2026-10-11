@@ -19,6 +19,7 @@ foreach ([
     'round5',
     'round7',
     'round6',
+    'round8',
 ] as $group) {
     $file = __DIR__.'/api/'.$group.'.php';
     if (is_file($file)) {

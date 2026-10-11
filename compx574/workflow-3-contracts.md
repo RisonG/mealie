@@ -1436,3 +1436,175 @@ The only writing path reachable without an outbound fetch is §7.18's expired-to
 `recipe_share_tokens` is empty. §7.24 reports a count and deletes nothing when there is nothing to
 delete, which is the state here. Every probe body is checked against its schema for a required
 field first, per round 5's rule. `dev/data/mealie.db` is compared against the snapshot after the run.
+
+---
+
+## Round 8 — `organizers`, `unit_and_foods`, `comments`
+
+41 endpoints: categories 8, tags 8, tools 6, foods 7, units 7, comments 5.
+
+### Mount points differ by package
+
+- `mealie/routes/organizers/__init__.py:5` adds `prefix="/organizers"`, and each controller adds
+  its own, so these are `/api/organizers/categories`, `/api/organizers/tags`,
+  `/api/organizers/tools`.
+- `mealie/routes/unit_and_foods/__init__.py:5` adds **nothing**; the controllers carry `/foods` and
+  `/units`, so these are `/api/foods` and `/api/units` — **not** under `/organizers` and not under
+  `/recipes`.
+- `mealie/routes/comments/__init__.py:19` carries `/comments` → `/api/comments`. This is separate
+  from `/api/recipes/{slug}/comments`, which was round 7.
+
+### Permissions are asymmetric, and this is the thing to get right
+
+`bob`'s `can_organize` is 0, as all his bits are.
+
+| Controller | Guard |
+|---|---|
+| categories | `checks.can_organize()` on create, merge, update, delete (`:54`, `:80`, `:102`, `:128`) |
+| tags | same four (`:49`, `:69`, `:91`, `:117`) |
+| foods | same four (`:51`, `:57`, `:71`, `:77`) |
+| **tools** | **none** — `controller_tools.py` has no `checks.` call at all |
+| **units** | **none** — `units.py` has no `checks.` call at all |
+| comments | no `can_organize`; instead `_check_comment_belongs_to_user` on update and delete |
+
+So `bob` can create, edit and delete **tools and units** but not categories, tags or foods.
+Assuming the five organizer-ish collections behave alike gives the wrong status on 8 of them.
+
+As always, request validation precedes the in-handler permission check, so a malformed body or a
+non-v4 id is a 422 before any 403.
+
+### Two measured details
+
+- **The organizer pagination guides are missing the `/organizers` prefix.** Verified:
+  `GET /api/organizers/categories?page=1&perPage=1` returns `"next": "/categories?orderBy=None&…"`.
+  Same `url_path_for`-on-the-sub-router cause as rounds 5, 6. `/api/foods` and `/api/units`
+  advertise `/foods` and `/units`, which happen to be right because those routers carry no extra
+  prefix.
+- **A category has two different shapes.** The list item is
+  `{id, groupId, name, slug, recipeCount}` (5 keys) but `GET /organizers/categories/{item_id}`
+  returns `CategorySummary` — `{id, slug, name}`, **3 keys, no groupId and no recipeCount**.
+  Verified. Tags behave the same way via `RecipeTagResponse`.
+
+### 8.1–8.8 Categories
+
+`controller_categories.py:17`, `APIRouter(prefix="/categories")`, `BaseCrudController`.
+
+| # | Route | Python | Guard |
+|---|---|---|---|
+| 8.1 | `GET /api/organizers/categories` | `:39` | — |
+| 8.2 | `POST /api/organizers/categories` | `:51` | `can_organize` → 403 |
+| 8.3 | `GET /api/organizers/categories/empty` | `:72` | — ; **verified `[]`** |
+| 8.4 | `POST /api/organizers/categories/merge` | `:77` | `can_organize` |
+| 8.5 | `GET /api/organizers/categories/{item_id}` | `:92` | — ; `CategorySummary`, 3 keys |
+| 8.6 | `PUT /api/organizers/categories/{item_id}` | `:99` | `can_organize` |
+| 8.7 | `DELETE /api/organizers/categories/{item_id}` | `:121` | `can_organize`; **returns null** — the handler has no return |
+| 8.8 | `GET /api/organizers/categories/slug/{category_slug}` | `:141` | — ; embeds a full recipe list, and `groupId` comes back **null** (verified) |
+
+- **§8.4's order** (`:79-90`): `can_organize` first, then `from_id == to_id` → **400** bare string
+  `"from_id and to_id must be different"`, then each id checked separately → **404**
+  `"from_id category not found"` / `"to_id category not found"`.
+- **Route order** — `/empty`, `/merge` and `/slug/{x}` are literal second segments and must precede
+  `/{item_id}`.
+- **Not implemented** — §8.2, §8.4, §8.6, §8.7's writes. All four are `can_organize`-guarded and so
+  are 403 for the parity token anyway.
+
+- **`GET /categories/slug/{unknown}` is a 404 but `GET /tags/slug/{unknown}` is a 500**, measured.
+  `controller_categories.py:141` goes through `mixins.get_one`, which raises a proper 404;
+  `controller_tags.py:133` and `controller_tools.py:56` return `repo.get_one(...)` straight to
+  FastAPI, which then fails to validate `None` against the response model. Three sibling
+  controllers, two behaviours.
+
+### 8.9–8.16 Tags
+
+`controller_tags.py:16`, `APIRouter(prefix="/tags")`. The same eight shapes as categories, with
+`/tags/empty` (`:41`), `/tags/merge` (`:46`, **POST**), `/tags/{item_id}` (`:61`, `:88`, `:110`),
+`/tags/slug/{tag_slug}` (`:133`), `GET ""` (`:29`) and `POST ""` (`:66`).
+
+- `tags` has 9 rows here; `/tags/empty` is **verified `[]`**.
+- Guards and route-order constraints are identical to categories.
+
+### 8.17–8.22 Tools
+
+`controller_tools.py:14`, `APIRouter(prefix="/tools")`, `BaseUserController` — **no permission
+check on any route**.
+
+| # | Route | Python |
+|---|---|---|
+| 8.17 | `GET /api/organizers/tools` | `:27` |
+| 8.18 | `POST /api/organizers/tools` | `:38` (**201**) |
+| 8.19 | `GET /api/organizers/tools/{item_id}` | `:43` |
+| 8.20 | `PUT /api/organizers/tools/{item_id}` | `:47` |
+| 8.21 | `DELETE /api/organizers/tools/{item_id}` | `:52` |
+| 8.22 | `GET /api/organizers/tools/slug/{tool_slug}` | `:56` |
+
+- `tools` is empty here, so §8.17 is a zero-item envelope and the id routes are 404s.
+- **Not implemented** — §8.18, §8.20, §8.21's writes. Unlike categories and tags these are
+  **reachable** for `bob`, so the request list must not probe them with a body the schema accepts.
+
+### 8.23–8.29 Foods
+
+`unit_and_foods/foods.py:21`, `APIRouter(prefix="/foods", route_class=MealieCrudRoute)`.
+
+| # | Route | Python | Guard |
+|---|---|---|---|
+| 8.23 | `GET /api/foods` | `:38` | — ; 2696 rows here |
+| 8.24 | `POST /api/foods` | `:49` | `can_organize` |
+| 8.25 | `PUT /api/foods/merge` | `:55` | `can_organize`; note **PUT**, where categories and tags use POST |
+| 8.26 | `GET /api/foods/{item_id}` | `:65` | — |
+| 8.27 | `PUT /api/foods/{item_id}` | `:69` | `can_organize` |
+| 8.28 | `DELETE /api/foods/{item_id}` | `:75` | `can_organize` |
+
+- **`IngredientFood`** is the 12-key shape round 5 already builds for shopping items:
+  `id`, `name`, `pluralName`, `description`, `extras`, `labelId`, `aliases`, `substitutions`,
+  `householdsWithIngredientFood`, `label`, `createdAt`, `updatedAt`.
+- **Route order** — `/foods/merge` is a **PUT** on a literal path and must precede
+  `PUT /foods/{item_id}`, or the merge is swallowed.
+- **Not implemented** — the four guarded writes.
+
+### 8.30–8.36 Units
+
+`unit_and_foods/units.py:21`, `APIRouter(prefix="/units", route_class=MealieCrudRoute)` — **no
+permission check on any route**, unlike foods.
+
+Same six shapes as foods: `GET ""` (`:38`), `POST ""` (`:49`), `PUT /merge` (`:54`),
+`GET /{item_id}` (`:63`), `PUT /{item_id}` (`:67`), `DELETE /{item_id}` (`:71`).
+
+- **`IngredientUnit`** is the 14-key shape round 5 builds: the food keys minus `labelId`/`label`/
+  `substitutions`/`householdsWithIngredientFood`, plus `fraction`, `abbreviation`,
+  `pluralAbbreviation`, `useAbbreviation`, `standardQuantity`, `standardUnit`.
+- 27 rows here.
+- **Not implemented** — the three writes, which are **reachable** for `bob`. Same caution as tools.
+
+### 8.37–8.41 Comments
+
+`comments/__init__.py:19`, `APIRouter(prefix="/comments")`, `BaseUserController`.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 8.37 | `GET /api/comments` | `:get_all` | `RecipeCommentPagination`; **verified** empty here |
+| 8.38 | `POST /api/comments` | | **201** |
+| 8.39 | `GET /api/comments/{item_id}` | | `UUID4` |
+| 8.40 | `PUT /api/comments/{item_id}` | | ownership check first |
+| 8.41 | `DELETE /api/comments/{item_id}` | | ownership check; returns `SuccessResponse` `"Comment deleted"`, not the deleted object |
+
+- **`_check_comment_belongs_to_user` is itself a latent 500.** It does
+  `comment = self.repo.get_one(item_id)` and then `comment.user_id` with no null check, so §8.40
+  and §8.41 on an id that does not exist raise `AttributeError` before any 404 — the same defect as
+  round 7's recipe comments route. A non-owner who is not an admin gets **403**
+  `"Comment does not belong to user"`.
+- **Not implemented** — §8.38's write. §8.40 and §8.41 reach the 500 or the 403 before writing.
+
+### Out of scope for round 8
+
+- `/api/recipes/{slug}/comments` — round 7.
+- The event bus behind every organizer write.
+- Merge semantics (re-pointing every recipe link, then deleting the source row) for all four merge
+  routes.
+
+### Database safety for this round
+
+Categories, tags and foods are `can_organize`-guarded and so unreachable for the parity token.
+**Tools, units and comments are not guarded**, so their create and update routes are reachable: the
+request list probes them with `parity.hurl`'s scalar body `0` only, never with an object, and each
+writing route is left unimplemented. `dev/data/mealie.db` is compared against the snapshot after the
+run.

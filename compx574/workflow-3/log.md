@@ -139,6 +139,12 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | 2026-10-11 ~07:10 | R7 | 24 routes written. A PHP parse error cost the first self-check run: `*/stream` inside a docblock closes the comment, which turned ten routes into 500s. Every controller and support file is now linted with `php -l` before scoring. Self-check after that: four status mismatches, all resolved by measuring instead of assuming — `/create/ai` and `/create/ai/stream` take **Form** fields rather than a JSON body, so a JSON payload is ignored and the handler runs, answering 400 (or a 200 SSE `event: error`) with "No content, images, or URL were provided"; `/bulk-actions/export/{id}/download` answers 404 `"export not found"`; and `/recipes/{slug}/exports?template_name=raw` is simply the recipe JSON, byte-identical to `GET /recipes/{slug}` apart from its four-space indentation. All four became exact implementations rather than 501s |
 | 2026-10-11 ~07:20 | R7 | **After round 7: 172/265** (R1 33/33, R2 **42/83**, R3 69/73, R4 28/76) — `results/p7-after-round7.txt`. **All 42 `/api/recipes` requests pass.** Self-check 11 identical, 17 differing, 0 status mismatches. `dev/data/mealie.db` sha unchanged |
 
+| 2026-10-11 ~07:30 | Gate 8 | Operator answered "继续"; gate 8 passed unchanged, agent-run as D7a |
+| 2026-10-11 ~07:45 | R8 | Round 8 contract written: 41 endpoints. The finding that matters is that the five organizer-ish collections are **not** alike: categories, tags and foods guard create/merge/update/delete with `checks.can_organize()`, while `controller_tools.py` and `units.py` have no `checks.` call at all, so `bob` can write tools and units but not the rest. Treating them uniformly gives the wrong status on eight routes, and it also changes which routes are write-reachable during the self-check. Two more measured details: the organizer pagination guides are missing the `/organizers` prefix (same `url_path_for` cause as rounds 5 and 6), and a category has two shapes — 5 keys in the list, 3 in `CategorySummary`, with no `groupId` or `recipeCount`. `/organizers/categories/slug/{slug}` returns `groupId: null`. No PHP written |
+
+| 2026-10-11 ~08:00 | R8 | 41 routes written, reusing round 5's `ShoppingSerializer::unit/food` for the foods and units item shapes. Self-check: one status mismatch, and it was another asymmetry between sibling controllers — `GET /organizers/categories/slug/<unknown>` is a **404** because the handler goes through `mixins.get_one`, while `tags/slug` and `tools/slug` return `repo.get_one(...)` straight to FastAPI, which fails to validate `None` against the response model and answers **500**. Measured, then reproduced. Final: 17 identical, 29 differing, 0 status mismatches |
+| 2026-10-11 ~08:05 | R8 | **After round 8: 211/265** (R1 33/33, R2 **81/83**, R3 69/73, R4 28/76) — `results/p8-after-round8.txt`. This passes W5's final 189/265 with one round still to go. The two remaining R2 failures are `/api/parser/*` and the four remaining R3 failures are `/api/shared/recipes`, both round 9. `dev/data/mealie.db` sha unchanged, and the write-reachable routes on tools, units and comments were probed with the scalar body only |
+
 ## Results so far
 
 | Label | Score | R1 | R2 | R3 | R4 |
@@ -151,6 +157,7 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | `p5-after-round5` — shopping and meal plans | 132/265 | 33/33 | 2/83 | 69/73 | 28/76 |
 | `p6-after-round6` — recipe CRUD, timeline, bulk actions | 152/265 | 33/33 | 22/83 | 69/73 | 28/76 |
 | `p7-after-round7` — recipe import, media, exports, shared | 172/265 | 33/33 | 42/83 | 69/73 | 28/76 |
+| `p8-after-round8` — organizers, foods, units, comments | 211/265 | 33/33 | 81/83 | 69/73 | 28/76 |
 
 Region labels are W5's four areas, kept unchanged in `measure.sh` so the two workflows' breakdowns
 line up. They do not correspond to W3's rounds.
