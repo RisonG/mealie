@@ -1160,3 +1160,132 @@ is valid input that creates nothing:
 
 Everything else that writes is left unimplemented, so the reachable paths are reads, 404s, 422s and
 §5.14's 400. `dev/data/mealie.db` is compared against the snapshot after every run.
+
+---
+
+## Round 6 — `recipe` CRUD, timeline events, bulk actions
+
+21 endpoints: 11 from `recipe_crud_routes.py`, 6 from `timeline_events.py`, 4 from
+`bulk_actions.py`. Scraping, imports, images, assets, exports and comments are round 7.
+
+`mealie/routes/recipe/__init__.py:5-14` adds `prefix="/recipes"` when including `comments`,
+`bulk_actions`, `shared_routes` and `timeline_events`, but **not** when including `exports` or
+`recipe_crud_routes`, which carry `/recipes` in their own routers. As in round 2, the prefix has to
+be worked out per file.
+
+All of round 6 is on `UserAPIRouter` or a `BaseUserController`, so every route needs a user. There
+are no `checks.*` calls; recipe permissions are enforced inside `RecipeService` instead and surface
+through `handle_exceptions`.
+
+### Three things measured against the oracle
+
+- **Two datetime formats, and now the reason.** `GET /recipes/{slug}` returns
+  `"createdAt": "2026-09-18T04:13:12.694890Z"`, but `GET /recipes` returns
+  `"...694890+00:00"` for the same kind of column. `get_all` (`recipe_crud_routes.py:559-563`)
+  bypasses FastAPI's serializer: it calls `orjson.dumps(pagination_response.model_dump(by_alias=True))`
+  and returns `JSONBytes` directly, with a comment saying this is to avoid validation. `model_dump`
+  leaves Python `datetime` objects in place and orjson renders them as `+00:00`, where pydantic's
+  own serializer renders UTC as `Z`. `GET /recipes/suggestions` takes the same path, so it is
+  `+00:00` too. Which form an endpoint uses therefore depends on whether it hands bytes back
+  directly, not on the column.
+- **`GET /recipes` builds its pagination guide differently from every other endpoint.** Instead of
+  the `orderBy=None&…` form, it merges `q.model_dump()` with the request's actual query string and
+  then **drops every None** (`:555-558`). Verified: `GET /recipes?page=1&perPage=1` returns
+  `"next": "/recipes?orderDirection=desc&page=2&perPage=1"` — three parameters, not seven, and no
+  literal `None`.
+- **`GET /recipes/timeline/events` advertises `/timeline/events`, without the `/recipes` prefix.**
+  Its `get_all` calls `router.url_path_for("get_all")` on the timeline router, whose own prefix is
+  `/timeline/events` (`timeline_events.py:26`); the `/recipes` part is added by `__init__.py:14` at
+  include time and `url_path_for` never sees it. Verified:
+  `"next": "/timeline/events?orderBy=None&…"`. Same class of defect as round 5's shopping items,
+  different cause. Reproduce, do not correct.
+
+### 6.1–6.11 Recipe CRUD
+
+`recipe_crud_routes.py:105`, `UserAPIRouter(prefix="/recipes", route_class=MealieCrudRoute)`.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 6.1 | `GET /api/recipes` | `:508` | `PaginationBase[RecipeSummary]`; guides as above. Optional `categories`, `tags`, `tools`, `foods`, `households` repeated query params, plus `RecipeSearchQuery` (`cookbook`, `search`, `requireAll*`). A `cookbook` that resolves to nothing → **404** `{"detail":"cookbook not found"}` |
+| 6.2 | `GET /api/recipes/suggestions` | `:565` | literal path, before `/{slug}`. `{"items":[{"recipe":{…},…}]}` |
+| 6.3 | `GET /api/recipes/{slug}` | `:583` | **slug or id** (`Path` description says so); full `Recipe`, 33 keys |
+| 6.4 | `POST /api/recipes` | `:594` | **201**, and the body is a **bare JSON string** — `response_model=str`, the new recipe's slug |
+| 6.5 | `POST /api/recipes/{slug}/duplicate` | `:618` | **201**, returns the full `Recipe` |
+| 6.6 | `PUT /api/recipes/{slug}` | `:640` | body is a whole `Recipe` |
+| 6.7 | `PUT /api/recipes` | `:663` | bulk; body is a JSON array of `Recipe`; returns an array |
+| 6.8 | `PATCH /api/recipes/{slug}` | `:688` | |
+| 6.9 | `PATCH /api/recipes` | `:711` | bulk |
+| 6.10 | `PATCH /api/recipes/{slug}/last-made` | `:736` | body `{"timestamp": …}` |
+| 6.11 | `DELETE /api/recipes/{slug}` | `:760` | returns the deleted `Recipe` |
+
+- **`handle_exceptions` (`:110-135`) is the error map for all of these**, and it is by exception
+  type, not by status: `PermissionDenied` → **403** `ErrorResponse` `"Permission Denied"`;
+  `NoEntryFound` → **404** `"No Entry Found"`; `IntegrityError` → **400** `"Recipe already exists"`;
+  `RecursiveRecipe` → **400** with the translated `exceptions.recursive-recipe-link`. Note the 404
+  message is `"No Entry Found"`, not the `"Not found."` that `HttpRepo` produces elsewhere — a
+  fourth distinct 404 body in this API.
+- **§6.4 returns a bare JSON string**, e.g. `"my-recipe"`, not an object. §6.5 returns an object.
+- **`RecipeSummary`** (verified, 25 keys): `id`, `userId`, `householdId`, `groupId`, `name`, `slug`,
+  `image`, `recipeServings`, `recipeYieldQuantity`, `recipeYield`, `totalTime`, `prepTime`,
+  `cookTime`, `performTime`, `description`, `recipeCategory`, `tags`, `tools`, `rating`, `orgURL`,
+  `dateAdded`, `dateUpdated`, `createdAt`, `updatedAt`, `lastMade`. The full `Recipe` adds eight
+  more (ingredients, instructions, assets, settings, notes, nutrition, extras, comments).
+- **Scoping**: `get_all` uses `group_recipes` (`household_id=None`) deliberately — the comment at
+  `:535-537` says all households' recipes are returned and a household filter belongs in
+  `queryFilter`.
+- **Not implemented** — §6.4–§6.11, all of which write through `RecipeService` (slug generation,
+  ingredient and instruction replacement, timeline entries, permission checks across households).
+  The read paths, the 404/403/400 mapping and the cookbook 404 are implemented.
+
+### 6.12–6.17 Timeline events
+
+`timeline_events.py:26`, `UserAPIRouter(prefix="/timeline/events", route_class=MealieCrudRoute)`,
+included with `prefix="/recipes"` → `/api/recipes/timeline/events`.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 6.12 | `GET /api/recipes/timeline/events` | `:47` | guide path missing `/recipes`, as above |
+| 6.13 | `POST /api/recipes/timeline/events` | `:61` | **201**; an unknown `recipeId` → **404** `{"detail":"recipe not found"}`, a bare string |
+| 6.14 | `GET /api/recipes/timeline/events/{item_id}` | `:89` | `UUID4` |
+| 6.15 | `PUT /api/recipes/timeline/events/{item_id}` | `:96` | |
+| 6.16 | `DELETE /api/recipes/timeline/events/{item_id}` | `:117` | returns the deleted event |
+| 6.17 | `PUT /api/recipes/timeline/events/{item_id}/image` | `:147` | multipart |
+
+- **`RecipeTimelineEventOut`** (verified, 12 keys): `recipeId`, `userId`, `subject`, `eventType`,
+  `eventMessage`, `image`, `timestamp`, `id`, `groupId`, `householdId`, `createdAt`, `updatedAt`.
+- `recipe_timeline_events` has 17 rows here, so this is one of the few collections in rounds 4-6
+  whose item shape can be checked against live data.
+- **Not implemented** — §6.13, §6.15, §6.16, §6.17's writes, and the image handling in §6.17.
+
+### 6.18–6.21 Bulk actions
+
+`bulk_actions.py:23`, `APIRouter(prefix="/bulk-actions")`, included with `prefix="/recipes"` →
+`/api/recipes/bulk-actions`. The export routes on this controller are round 7.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 6.18 | `POST /api/recipes/bulk-actions/tag` | `:37` | body `AssignTags`; **returns null** — the handler has no return, and a `# TODO` at `:36` asks whether it should |
+| 6.19 | `POST /api/recipes/bulk-actions/settings` | `:41` | returns null |
+| 6.20 | `POST /api/recipes/bulk-actions/categorize` | `:45` | returns null |
+| 6.21 | `POST /api/recipes/bulk-actions/delete` | `:49` | returns null; `PermissionDenied` → **403** `ErrorResponse` `"Permission Denied"` |
+
+- **All four return a bare `null` with 200**, the same Laravel trap as rounds 2 and 4.
+- **Not implemented** — all four mutate. Their body validation is implemented; the service calls
+  are not.
+
+### Out of scope for round 6
+
+- Scraping and import: `/recipes/test-scrape-url`, `/recipes/create/url`, `/create/html-or-json`,
+  `/create/ai`, `/create/zip`, `/create/image`, and the four `*/stream` variants — round 7.
+- Images, assets, exports, `/recipes/{slug}/comments` and the shared-token routes — round 7.
+- The bulk **export** routes on `bulk_actions.py` (`/export`, `/export/{id}/download`,
+  `/export/purge`) — round 7.
+- `RecipeService` writes in every form, and the event bus behind them.
+
+### Database safety for this round
+
+Every writing endpoint is left unimplemented. Per round 5's rule, each probe body in the request
+list is checked against its schema for a required field first: `CreateRecipe` requires `name`,
+`RecipeTimelineEventIn` requires `recipeId` and `subject`, and the three `Assign*` bodies require
+`recipes`, so an empty object is a 422 on all of them and no row is created. `dev/data/mealie.db` is
+compared against `dev/data/mealie.w3-snapshot.db` after the run.

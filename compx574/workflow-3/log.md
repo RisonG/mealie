@@ -125,6 +125,14 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | 2026-10-11 ~05:20 | R5 | Three endpoints turned out to be implementable with no write at all, because an empty collection is valid input that creates nothing: `POST /shopping/items/create-bulk` and `PUT /shopping/items` with `[]` return the empty `ShoppingListItemsCollectionOut`, and `DELETE /shopping/items` with no `ids` returns `SuccessResponse`. Self-check after the fixes: **12 identical, 25 differing, 0 status mismatches** |
 | 2026-10-11 ~05:25 | R5 | **After round 5: 132/265** (R1 33/33, R2 2/83, R3 **69/73**, R4 28/76) — `results/p5-after-round5.txt`. Every `/api/households` request now passes. The four remaining R3 failures are all `/api/shared/recipes`, which is round 9. `dev/data/mealie.db` sha unchanged by the scoring run |
 
+| 2026-10-11 ~05:35 | Gate 6 | Operator answered "继续"; gate 6 passed unchanged, agent-run as D7a |
+| 2026-10-11 ~05:50 | R6 | Round 6 contract written: 21 endpoints across recipe CRUD, timeline events and bulk actions. The round 5 datetime question is answered: `GET /recipes` calls `orjson.dumps(model_dump(by_alias=True))` and returns `JSONBytes` directly to skip validation (`recipe_crud_routes.py:559-563`), so its datetimes come out `+00:00`, while `GET /recipes/{slug}` goes through pydantic and comes out `Z`. The format follows the response path, not the column. Two more pagination-guide defects: `GET /recipes` merges the real query string and **drops** every None rather than rendering the literal `"None"`, so its guide has three parameters where others have seven; and `GET /recipes/timeline/events` advertises `/timeline/events` without the `/recipes` prefix, because `url_path_for` runs on the sub-router and the prefix is added at include time. Also a fourth distinct 404 body: `handle_exceptions` maps `NoEntryFound` to `"No Entry Found"`. No PHP written |
+
+| 2026-10-11 ~06:00 | Gate 6 | Operator answered "继续"; gate 6 passed unchanged, agent-run as D7a |
+| 2026-10-11 ~06:25 | R6 | 21 routes written. Self-check: **8 identical, 22 differing, 0 status mismatches**. `GET /recipes/{slug}` matches byte for byte — the full 33-key `Recipe` including nested ingredients with their embedded units and foods, computed `display` strings, instructions, settings and nutrition, which exercises most of what rounds 5 and 6 built. A field-by-field diff of the list endpoint found exactly one defect: `recipeYield` was being coerced to `""` where the oracle returns `null` for a NULL column. Both datetime renderings and the unusual `/recipes` guide format (`?orderDirection=desc&page=2&perPage=1`, no literal `None`) came out exact |
+| 2026-10-11 ~06:30 | R6 | **After round 6: 152/265** (R1 33/33, R2 **22/83**, R3 69/73, R4 28/76) — `results/p6-after-round6.txt`. Every round 6 endpoint passes. One adjacent failure, `GET /api/recipes/shared/{token_id}`, belongs to round 7's `shared_routes.py` and will be fixed when that route is declared ahead of `/{slug}`. `dev/data/mealie.db` sha unchanged |
+| — | note | Limitation of `sandbox/compare.sh` worth recording: it compares only the first 400 bytes of each body, so a difference beyond that is invisible to it. The field-by-field diff used on the recipe list this round is the way to check a large response, and the `identical` count should not be read as byte-equality for long bodies |
+
 ## Results so far
 
 | Label | Score | R1 | R2 | R3 | R4 |
@@ -135,6 +143,7 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | `p3-after-round3` — groups | 71/265 | 33/33 | 2/83 | 8/73 | 28/76 |
 | `p4-after-round4` — households core | 103/265 | 33/33 | 2/83 | 40/73 | 28/76 |
 | `p5-after-round5` — shopping and meal plans | 132/265 | 33/33 | 2/83 | 69/73 | 28/76 |
+| `p6-after-round6` — recipe CRUD, timeline, bulk actions | 152/265 | 33/33 | 22/83 | 69/73 | 28/76 |
 
 Region labels are W5's four areas, kept unchanged in `measure.sh` so the two workflows' breakdowns
 line up. They do not correspond to W3's rounds.
