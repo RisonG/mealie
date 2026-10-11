@@ -145,6 +145,13 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | 2026-10-11 ~08:00 | R8 | 41 routes written, reusing round 5's `ShoppingSerializer::unit/food` for the foods and units item shapes. Self-check: one status mismatch, and it was another asymmetry between sibling controllers — `GET /organizers/categories/slug/<unknown>` is a **404** because the handler goes through `mixins.get_one`, while `tags/slug` and `tools/slug` return `repo.get_one(...)` straight to FastAPI, which fails to validate `None` against the response model and answers **500**. Measured, then reproduced. Final: 17 identical, 29 differing, 0 status mismatches |
 | 2026-10-11 ~08:05 | R8 | **After round 8: 211/265** (R1 33/33, R2 **81/83**, R3 69/73, R4 28/76) — `results/p8-after-round8.txt`. This passes W5's final 189/265 with one round still to go. The two remaining R2 failures are `/api/parser/*` and the four remaining R3 failures are `/api/shared/recipes`, both round 9. `dev/data/mealie.db` sha unchanged, and the write-reachable routes on tools, units and comments were probed with the scalar body only |
 
+| 2026-10-11 ~08:15 | Gate 9 | Operator answered "继续"; gate 9 passed unchanged, agent-run as D7a |
+| 2026-10-11 ~08:30 | R9 | Round 9 contract written: 64 endpoints. It sharpens round 3's ordering rule, which was stated too broadly. Request validation precedes a permission check written **inside a handler**, but **not** one attached to the router as a dependency: measured, a scalar body on an `AdminAPIRouter` route is a **403** with the body never parsed, while the same body on a `checks.can_organize()` route is a 422. All 38 admin routes are therefore 403 for the parity token whatever is sent. The discriminating detail: `GET /api/admin/nonexistent-w3` with a non-admin token is **404**, not 403, because routing happens before the dependency — so a middleware that blanket-403s `/api/admin*` ahead of routing differs from a faithful translation of `get_admin_user`, which is exactly what W1 did. Also measured: explore is anonymous via `get_public_group`, and an unknown or private group is an indistinguishable 404 |
+
+| 2026-10-11 ~08:50 | R9 | 64 routes written. First score **261/265**; the four failures were all media routes where the entity exists but the file does not. Reading `media_recipe.py` showed why: those handlers **never touch the database** — they only stat the filesystem, so an unknown recipe id and a missing file are the same 404. `file_name` on the image routes is an `ImageType` enum, so a name outside the three permitted ones is a 422, and the asset and user routes carry a path-traversal guard that answers 400. Rewritten against the filesystem |
+| 2026-10-11 ~08:55 | R9 | **After round 9: 265/265** (R1 33/33, R2 83/83, R3 73/73, R4 76/76) — `results/p9-final.txt`. `dev/data/mealie.db` sha unchanged; no shared file under `compx574/` was modified |
+| 2026-10-11 ~09:05 | — | Body accuracy run with `accuracy_compare_w3.py` (the shared script with `php-w1` changed to `php-w3` and the root path adjusted for its directory): **42/43**, one difference — timeline event `subject` is stored as the message key `recipe.recipe-created` and the API returns the translated `"Recipe Created"`. Added en-US key resolution to the serializer. Re-run: **43/43**, `results/p9-accuracy.txt` |
+
 ## Results so far
 
 | Label | Score | R1 | R2 | R3 | R4 |
@@ -158,6 +165,60 @@ Measured by `compx574/workflow-5/measure.sh` on this same shared DB (source: `co
 | `p6-after-round6` — recipe CRUD, timeline, bulk actions | 152/265 | 33/33 | 22/83 | 69/73 | 28/76 |
 | `p7-after-round7` — recipe import, media, exports, shared | 172/265 | 33/33 | 42/83 | 69/73 | 28/76 |
 | `p8-after-round8` — organizers, foods, units, comments | 211/265 | 33/33 | 81/83 | 69/73 | 28/76 |
+| `p9-final` — admin, explore, media, parser, shared | **265/265** | 33/33 | 83/83 | 73/73 | 76/76 |
 
 Region labels are W5's four areas, kept unchanged in `measure.sh` so the two workflows' breakdowns
 line up. They do not correspond to W3's rounds.
+
+## Final comparison
+
+| Build | Parity (status) | Body accuracy | Notes |
+|---|---|---|---|
+| Phase 0 skeleton, no routes | 12/265 | — | floor |
+| **W3 single agent, module by module** | **265/265** | **43/43** | this build |
+| W5 multi-agent | 189/265 | 37/40 | 188 of 272 routes registered |
+| W1 single instruction | 263/265 | 15/40 | 110/265 with its contract middleware removed |
+
+W1's and W5's numbers are from `compx574/workflow-5/results/`; the body-accuracy denominators differ
+(W5's script sampled 40 paths, the shared script 43), so those two columns are not directly
+comparable row to row.
+
+## What the 265/265 does and does not mean
+
+`parity.hurl` sends 265 scored requests. Measured from `results/p9-final.txt`, the Python oracle
+answers **2xx on only 75 of them**; the other 190 are rejection paths — 133 are 422, 38 are 403, 12
+are 404, 4 are 500, and one each 400/401/405. The check is mostly a test of *whether a route exists
+and validates its input the way FastAPI does*, not of whether it does the work behind it.
+
+Two consequences the report should state plainly:
+
+1. **38 of the passes are `/api/admin/*`, and none of that package is implemented.** The token
+   `run.sh` mints belongs to `bob`, who is not an admin, so `get_admin_user` refuses every one of
+   them before the handler. W3 declares the real routes and attaches the middleware that translates
+   that dependency; for an actual admin caller this PHP would be wrong. The contract says so per
+   endpoint, and this is not visible in the score.
+2. **Where W3 and W1 differ is how the 403s are produced, and it is testable.**
+   `GET /api/admin/nonexistent-w3` with a non-admin token is a **404** in Python, because routing
+   happens before dependency resolution — measured here. W3 reproduces it: every route is declared
+   from the Python source and an undeclared admin path 404s.
+
+   W1's side of this is **not** measured by W3 and is cited, not asserted:
+   `compx574/workflow-5/log.md` records that W1 prepends `MatchPythonContract` as global
+   middleware so that "every `/api/admin*` path returns 401/403 for a non-admin caller … whether or
+   not a route exists", that 153 of its 263 passes depend on it, and that removing it drops W1 to
+   110/265. Whoever compiles the group report should re-run that probe against `php-w1` directly
+   rather than take this paragraph as evidence; W3 held `php-w1` out and did not test it. The
+   body-accuracy column is the other side of the same point — 15/40 against 43/43.
+
+The honest summary is that W3 implements every route's existence, parameter validation, permission
+gate and read path, and implements roughly half the write paths not at all, reporting those as 501
+rather than inventing a success. `compx574/workflow-3-contracts.md` lists every one of them under
+"Not implemented".
+
+## Hold-out discipline, in full
+
+`compx574/hurl/` was never read or run by the implementing work. Each round was verified by sending
+the same request to Python :9000 and to PHP :9001 and diffing status and body
+(`sandbox/compare.sh`), and `measure.sh` was run only at round boundaries. The one leak is recorded
+as D2a: during setup, before the hold-out was adopted, the path inventory was counted and the first
+~80 lines were read. Status assertions were not.

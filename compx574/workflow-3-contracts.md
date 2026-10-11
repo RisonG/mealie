@@ -1608,3 +1608,141 @@ Categories, tags and foods are `can_organize`-guarded and so unreachable for the
 request list probes them with `parity.hurl`'s scalar body `0` only, never with an object, and each
 writing route is left unimplemented. `dev/data/mealie.db` is compared against the snapshot after the
 run.
+
+---
+
+## Round 9 — `admin`, `explore`, `media`, `parser`, `shared`
+
+64 endpoints: admin 38, explore 15, media 5, parser 2, shared 4.
+
+### The rule this round sharpens
+
+Round 3 established that request validation precedes every permission check. That is true for
+checks written **inside a handler** (`self.checks.can_manage()`, `assert_user_change_allowed`). It
+is **not** true for checks attached to the router as a dependency. Measured:
+
+| Where the check lives | Example | Scalar body on that route |
+|---|---|---|
+| Router dependency | `AdminAPIRouter` → `Depends(get_admin_user)` | **403**, body never parsed |
+| Router dependency | `UserAPIRouter` → `Depends(get_current_user)` | **401** when unauthenticated |
+| Inside the handler | `checks.can_organize()`, `checks.can_manage()` | **422**, validation first |
+
+So all 38 admin routes answer **403** for the parity token whatever is sent, while a
+`can_organize` route answers 422 for the same body. The convention in this document's preamble
+should be read with that distinction.
+
+**And the 403 does not extend to paths that do not exist.** Verified:
+`GET /api/admin/nonexistent-w3` with a non-admin token is **404**, not 403, because routing happens
+before the dependency. A middleware that blanket-403s `/api/admin*` ahead of routing gets this
+wrong — it is the difference between translating `get_admin_user` and short-circuiting the test.
+
+### 9.1–9.38 Admin
+
+`mealie/routes/admin/__init__.py:15`, `AdminAPIRouter(prefix="/admin")`. Every sub-router inherits
+`Depends(get_admin_user)` (`routes/_base/routers.py:13-17`), which answers **401** with no token and
+**403** `{"detail":"Forbidden"}` for a non-admin. `bob` is not an admin, so all 38 are 403.
+
+| File | Count | Paths |
+|---|---|---|
+| `admin_about.py` | 3 | `/admin/about`, `/admin/about/statistics`, `/admin/about/check` |
+| `admin_management_users.py` | 7 | `/admin/users` (GET, POST), `/admin/users/{item_id}` (GET, PUT, DELETE), `/admin/users/unlock`, `/admin/users/password-reset-token` |
+| `admin_management_households.py` | 5 | `/admin/households` (GET, POST), `/admin/households/{item_id}` (GET, PUT, DELETE) |
+| `admin_management_groups.py` | 5 | `/admin/groups` (GET, POST), `/admin/groups/{item_id}` (GET, PUT, DELETE) |
+| `admin_management_ai_providers.py` | 4 | `/admin/ai-providers/...` |
+| `admin_email.py` | 2 | `/admin/email` (GET, POST) |
+| `admin_backups.py` | 6 | `/admin/backups`, `/admin/backups/upload`, `/admin/backups/{file_name}` (GET, DELETE), `/admin/backups/{file_name}/restore` |
+| `admin_maintenance.py` | 5 | `/admin/maintenance`, `/admin/maintenance/storage`, `/admin/maintenance/logs`, `/admin/maintenance/clean/*` |
+| `admin_debug.py` | 1 | `/admin/debug/openai` |
+
+- **Implementation**: the paths are declared from the Python source and carry the `mealie:admin`
+  middleware, which is the translation of the router dependency. Nothing behind them is
+  implemented, and nothing needs to be for this caller — but the routes are real, so an undeclared
+  admin path still 404s, as it does in Python.
+- **Not implemented** — every admin behaviour: user and group management, backup creation and
+  restore, maintenance tasks, email sending, the OpenAI debug call. For an admin caller this PHP
+  would be wrong; the report must say so rather than let 38 green rows imply otherwise.
+
+### 9.39–9.53 Explore
+
+`mealie/routes/explore/__init__.py:12`, `APIRouter(prefix="/explore/groups/{group_slug}")`.
+
+**Anonymous.** The controllers extend `BasePublicGroupExploreController` /
+`BasePublicHouseholdExploreController` (`base_controllers.py:86`, `:106`), whose dependency is
+`get_public_group`, not `get_current_user`. Verified: no token needed, 200.
+
+- **`get_public_group`** (`dependencies.py:66-73`) resolves `group_slug` by slug **or id** and
+  raises **404** `"group not found"` when the group is missing **or private**. Verified:
+  `/explore/groups/nope-w3/recipes` is 404. A private group is indistinguishable from a missing one.
+
+| # | Path under `/api/explore/groups/{group_slug}` | Python |
+|---|---|---|
+| 9.39–9.40 | `/foods`, `/foods/{item_id}` | `controller_public_foods.py:19`, `:34` |
+| 9.41–9.42 | `/households`, `/households/{household_slug}` | `controller_public_households.py:19`, `:30` |
+| 9.43–9.48 | `/organizers/categories`, `/organizers/categories/{item_id}`, and the same for `tags` and `tools` | `controller_public_organizers.py:24`-`:99` |
+| 9.49–9.50 | `/cookbooks`, `/cookbooks/{item_id}` | `controller_public_cookbooks.py:22`, `:40` |
+| 9.51–9.53 | `/recipes`, `/recipes/suggestions`, `/recipes/{recipe_slug}` | `controller_public_recipes.py:31`, `:92`, `:109` |
+
+- **Route order** — `/recipes/suggestions` precedes `/recipes/{recipe_slug}`; the organizer paths
+  sit under a `base_prefix` of `/organizers`.
+- **Household filtering** — the household-level controllers must exclude households whose
+  `private_household` is true, per `get_public_household` and `cross_household_repos`
+  (`base_controllers.py:96-129`). The one household here is public.
+- **Not implemented** — nothing. These are reads of data rounds 5-8 already serialize.
+
+### 9.54–9.58 Media
+
+`mealie/routes/media/__init__.py:8`, `APIRouter(prefix="/api/media")` — it carries the full `/api`
+itself and is included at `mealie/app.py:149`, like `utility_routes.py` in round 1. **Anonymous.**
+
+| # | Route | Python |
+|---|---|---|
+| 9.54 | `GET /api/media/recipes/{recipe_id}/images/{file_name}` | `media_recipe.py:19` |
+| 9.55 | `GET /api/media/recipes/{recipe_id}/images/timeline/{timeline_event_id}/{file_name}` | `media_recipe.py:33` |
+| 9.56 | `GET /api/media/recipes/{recipe_id}/assets/{file_name}` | `media_recipe.py:51` |
+| 9.57 | `GET /api/media/users/{user_id}/{file_name}` | `media_user.py:10` |
+| 9.58 | `GET /api/media/docker/validate.txt` | `media/__init__.py:14` |
+
+- **`recipe_id` and `user_id` are `UUID4`**, so a malformed one is a **422** before the handler.
+  Verified on §9.57.
+- **Route order** — `/images/timeline/{id}/{file}` must precede `/images/{file_name}`, and
+  `/docker/validate.txt` must not be captured by `/recipes/...` or `/users/...` (it is not, they
+  have distinct first segments).
+- **Not implemented** — serving the files themselves. The 422 and the 404-for-missing-file are
+  implemented; no bytes are returned.
+
+### 9.59–9.60 Parser
+
+`parser/ingredient_parser.py:8`, `APIRouter(prefix="/parser")`, on a `UserAPIRouter`-equivalent
+controller — authenticated, and a scalar body is a **422** (verified), so the auth dependency
+passes and then validation rejects.
+
+- `POST /api/parser/ingredient` (`:13`) → `ParsedIngredient`
+- `POST /api/parser/ingredients` (`:19`) → a bare array of `ParsedIngredient`
+- **Not implemented** — the NLP ingredient parser itself. The 422 path is.
+
+### 9.61–9.64 Shared recipe tokens
+
+`shared/__init__.py:14`, `UserAPIRouter(prefix="/shared/recipes")` — **authenticated**, unlike
+round 7's `/api/recipes/shared/{token_id}`, which is the public side of the same feature.
+
+| # | Route | Notes |
+|---|---|---|
+| 9.61 | `GET /api/shared/recipes` | bare array of `RecipeShareTokenSummary`; optional `recipe_id` query |
+| 9.62 | `POST /api/shared/recipes` | **201**; a recipe outside the caller's group → **404** `"Recipe not found in your group"` |
+| 9.63 | `GET /api/shared/recipes/{item_id}` | `UUID4` |
+| 9.64 | `DELETE /api/shared/recipes/{item_id}` | returns **null** — the handler is typed `-> None` |
+
+- `recipe_share_tokens` is empty here, so §9.61 is `[]` and the id routes are 404s.
+- **Not implemented** — §9.62's write.
+
+### Out of scope for round 9
+
+- Every admin behaviour (see above).
+- Serving media bytes.
+- The ingredient parser.
+- `mealie/routes/spa/` — excluded from this rewrite throughout.
+
+### Database safety for this round
+
+Admin is unreachable for the parity token, explore and media are read-only, parser does not write,
+and §9.62 is left unimplemented. `dev/data/mealie.db` is compared against the snapshot after the run.

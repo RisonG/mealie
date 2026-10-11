@@ -20,6 +20,8 @@ foreach ([
     'round7',
     'round6',
     'round8',
+    'round9-admin',
+    'round9',
 ] as $group) {
     $file = __DIR__.'/api/'.$group.'.php';
     if (is_file($file)) {

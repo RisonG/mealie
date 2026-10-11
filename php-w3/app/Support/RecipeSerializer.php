@@ -97,7 +97,8 @@ class RecipeSerializer
         return [
             'recipeId' => Guid::dash($e->recipe_id),
             'userId' => Guid::dash($e->user_id),
-            'subject' => $e->subject,
+            // The column stores a translation key; the API returns the translated string.
+            'subject' => self::translate($e->subject),
             'eventType' => $e->event_type,
             'eventMessage' => $e->message,
             'image' => $e->image,
@@ -108,6 +109,34 @@ class RecipeSerializer
             'createdAt' => Dates::out($e->created_at),
             'updatedAt' => Dates::out($e->update_at),
         ];
+    }
+
+    /**
+     * Timeline subjects are stored as message keys (e.g. "recipe.recipe-created") and rendered
+     * through the locale provider on the way out. Only en-US is loaded in this rewrite, which the
+     * contract records; an unknown key is passed through unchanged, as a missing translation would be.
+     */
+    private static function translate(?string $key): ?string
+    {
+        static $messages = null;
+        if ($messages === null) {
+            $path = dirname(base_path()).'/mealie/lang/messages/en-US.json';
+            $messages = is_file($path) ? (json_decode(file_get_contents($path), true) ?: []) : [];
+        }
+
+        if ($key === null || ! str_contains($key, '.')) {
+            return $key;
+        }
+
+        $node = $messages;
+        foreach (explode('.', $key) as $segment) {
+            if (! is_array($node) || ! array_key_exists($segment, $node)) {
+                return $key;
+            }
+            $node = $node[$segment];
+        }
+
+        return is_string($node) ? $node : $key;
     }
 
     /** RecipeIngredient — the shopping item shape plus title, originalText, substitutions, referenceId. */
