@@ -997,3 +997,166 @@ Writing endpoints: §4.2, §4.3, §4.5, §4.6, §4.8, §4.10, §4.11, §4.14, §
 §4.27, §4.30, §4.34, §4.35. Of these, §4.23, §4.24 and §4.27 are permission-guarded and so are 403
 for the parity token; the rest are reachable and are exercised only through their 404 and 422 paths.
 `dev/data/mealie.db` is compared against `dev/data/mealie.w3-snapshot.db` after the run.
+
+---
+
+## Round 5 — `households/shopping` and `households/mealplans`
+
+30 endpoints from `controller_shopping_lists.py` (two routers), `controller_mealplan.py` and
+`controller_mealplan_rules.py`. All authenticated through `BaseCrudController` /
+`BaseUserController`; no permission checks anywhere in this round.
+
+### Route order is load-bearing
+
+`mealie/routes/households/__init__.py:26-28` carries a comment saying the meal-plan **rules** router
+must be included before the meal-plan router. The reason: `/households/mealplans/rules` would
+otherwise be captured by `/households/mealplans/{item_id}`. The same applies in PHP, and to
+`/mealplans/today` and `/mealplans/random`, and to `/shopping/items/create-bulk` ahead of
+`/shopping/items/{item_id}`.
+
+### Four things measured against the oracle
+
+- **`/households/shopping/items` returns a pagination guide pointing at
+  `/households/shopping/lists`.** `ShoppingListItemController.get_all`
+  (`controller_shopping_lists.py:119`) calls `router.url_path_for("get_all")`, but `router` is the
+  **lists** router, defined 37 lines further down at `:156`; the items router is `item_router`.
+  Python resolves the global at call time, so the items endpoint advertises the lists path.
+  Verified: `GET /households/shopping/items?page=2&perPage=1` returns
+  `"previous": "/households/shopping/lists?...&page=1&perPage=1"`. This is an upstream defect and
+  the rewrite reproduces it; "fixing" it would fail parity.
+- **`GET /households/mealplans` never sets pagination guides at all.** It returns
+  `self.repo.page_all(pagination=q)` directly (`controller_mealplan.py:101`) with no
+  `set_pagination_guides` call, so `next` and `previous` are **always null**, on every page. Every
+  other paginated endpoint in the API sets them. Verified.
+- **`/households/mealplans/{item_id}` is an `int`**, not a UUID (`controller_mealplan.py:183`,
+  `:187`, `:212`) — `group_meal_plans.id` is an INTEGER primary key. A non-integer is a **422**
+  `int_parsing`. Meanwhile `/households/mealplans/rules/{item_id}` is a `UUID4`. Two id types under
+  the same path prefix.
+- **Timestamps carry `Z`.** `NaiveDateTime.process_result_value`
+  (`mealie/db/models/_model_utils/datetime.py:43-50`) puts `UTC` back on every value as it is read,
+  so pydantic emits `2026-07-30T22:36:59.914360Z`. Microseconds are dropped when zero.
+  **But not everywhere**: `/api/recipes` emits `+00:00` for the same kind of column. The two forms
+  are not interchangeable and the correct one has to be observed per endpoint rather than assumed.
+  Round 6 revisits this for recipes.
+
+### 5.1–5.8 Shopping list items
+
+`controller_shopping_lists.py:38`, `APIRouter(prefix="/households/shopping/items")`,
+`ShoppingListItemController(BaseCrudController)`.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 5.1 | `GET /api/households/shopping/items` | `:115` | `ShoppingListItemPagination`; guide path is wrong, see above |
+| 5.2 | `POST /api/households/shopping/items/create-bulk` | `:121` | **201**; body is a **JSON array** of `ShoppingListItemCreate` |
+| 5.3 | `POST /api/households/shopping/items` | `:127` | **201**; delegates to §5.2 with a single-element list, so its response is the same **collection** object, not a single item |
+| 5.4 | `GET /api/households/shopping/items/{item_id}` | `:131` | `UUID4`; returns a single `ShoppingListItemOut` |
+| 5.5 | `PUT /api/households/shopping/items` | `:135` | bulk update; body is a JSON array of `ShoppingListItemUpdateBulk` |
+| 5.6 | `PUT /api/households/shopping/items/{item_id}` | `:141` | delegates to §5.5, so again the response is a **collection**, not the single item the path suggests |
+| 5.7 | `DELETE /api/households/shopping/items` | `:145` | ids come from a repeated **query** parameter `ids`, not a body; returns `SuccessResponse` |
+| 5.8 | `DELETE /api/households/shopping/items/{item_id}` | `:151` | delegates to §5.7; returns `SuccessResponse`, not the deleted item |
+
+- **Four of the eight return something other than what the path shape implies** — §5.3, §5.6
+  return collections; §5.7, §5.8 return `{"message": "", "error": false}`.
+- **`ShoppingListItemOut`** (verified, 20 keys in order): `quantity`, `unit`, `food`,
+  `referencedRecipe`, `note`, `display`, `shoppingListId`, `checked`, `position`, `foodId`,
+  `labelId`, `unitId`, `extras`, `id`, `groupId`, `householdId`, `label`, `recipeReferences`,
+  `createdAt`, `updatedAt`. `unit` and `food` are **fully embedded objects**, not ids — the same
+  shapes round 8 owns, which means round 5 has to serialize them first.
+- **Not implemented** — every write. The bulk create/update/delete paths go through
+  `ShoppingListService`, which recalculates item merging and label positions; reproducing that is
+  out of scope for this round and is reported rather than approximated.
+
+### 5.9–5.17 Shopping lists
+
+`controller_shopping_lists.py:156`, `APIRouter(prefix="/households/shopping/lists")`.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 5.9 | `GET /api/households/shopping/lists` | `:176` | `PaginationBase[ShoppingListSummary]` — the **summary**, with no `listItems` |
+| 5.10 | `POST /api/households/shopping/lists` | `:186` | **201** |
+| 5.11 | `GET /api/households/shopping/lists/{item_id}` | `:200` | `UUID4`; `ShoppingListOut`, which **does** carry `listItems` |
+| 5.12 | `PUT /api/households/shopping/lists/{item_id}` | `:204` | |
+| 5.13 | `DELETE /api/households/shopping/lists/{item_id}` | `:217` | returns the deleted list |
+| 5.14 | `PUT /api/households/shopping/lists/{item_id}/label-settings` | `:234` | body is a JSON array; any element whose `shoppingListId` differs from the path id → **400** with the bare string ``object <id> has an invalid shopping list id`` |
+| 5.15 | `POST /api/households/shopping/lists/{item_id}/recipe` | `:256` | body is a JSON array of `ShoppingListAddRecipeParamsBulk` |
+| 5.16 | `POST /api/households/shopping/lists/{item_id}/recipe/{recipe_id}` | `:263` | **deprecated**; body optional, defaults to `{"recipeIncrementQuantity": 1}` |
+| 5.17 | `POST /api/households/shopping/lists/{item_id}/recipe/{recipe_id}/delete` | `:274` | body optional; a POST that removes, not a DELETE |
+
+- **`ShoppingListSummary` and `ShoppingListOut` differ by one key.** The list endpoint returns the
+  summary (`name`, `extras`, `createdAt`, `updatedAt`, `groupId`, `userId`, `id`, `householdId`,
+  `recipeReferences`, `labelSettings`); the single-read inserts `listItems` after `id`. Returning
+  the full object from the list endpoint is the obvious mistake.
+- **`labelSettings` items** (verified): `{shoppingListId, labelId, position, id, label{…}}`, where
+  `label` is the round 3 label shape.
+- **§5.17 is a POST whose purpose is deletion**, with the path ending in `/delete`. Routing it as a
+  DELETE would 405.
+- **Not implemented** — §5.10 and §5.12–§5.17's writes, all of which go through
+  `ShoppingListService` (ingredient merging, quantity increments, label repositioning). §5.14's 400
+  validation is implemented because it precedes the write.
+
+### 5.18–5.25 Meal plans
+
+`controller_mealplan.py:27`, `APIRouter(prefix="/households/mealplans")`.
+
+| # | Route | Python | Notes |
+|---|---|---|---|
+| 5.18 | `GET /api/households/mealplans` | `:81` | optional `start_date` / `end_date` query; they are folded into `query_filter` as `date >= …`/`date <= …` (`:88-99`). **No pagination guides** |
+| 5.19 | `POST /api/households/mealplans` | `:103` | **201** |
+| 5.20 | `GET /api/households/mealplans/today` | `:129` | literal path, must precede `/{item_id}`. Returns a **bare array**, verified `[]` here |
+| 5.21 | `POST /api/households/mealplans/random` | `:134` | literal path; picks a recipe by the household's meal-plan rules |
+| 5.22 | `GET /api/households/mealplans/{item_id}` | `:182` | **`int`** |
+| 5.23 | `PUT /api/households/mealplans/{item_id}` | `:186` | `int` |
+| 5.24 | `DELETE /api/households/mealplans/{item_id}` | `:211` | `int` |
+
+- `group_meal_plans` is empty in this database, so §5.18 is a zero-item envelope and §5.20 is `[]`.
+- **Not implemented** — §5.19, §5.21, §5.23, §5.24. §5.21 in particular walks the rule set and
+  random-selects a recipe; its result is not reproducible and is reported rather than invented.
+
+### 5.25–5.30 Meal plan rules
+
+`controller_mealplan_rules.py:14`, `UserAPIRouter(prefix="/households/mealplans/rules")`.
+
+| # | Route | Python |
+|---|---|---|
+| 5.25 | `GET /api/households/mealplans/rules` | `:27` |
+| 5.26 | `POST /api/households/mealplans/rules` | `:37` (**201**) |
+| 5.27 | `GET /api/households/mealplans/rules/{item_id}` | `:42` (`UUID4`) |
+| 5.28 | `PUT /api/households/mealplans/rules/{item_id}` | `:46` |
+| 5.29 | `DELETE /api/households/mealplans/rules/{item_id}` | `:50` |
+
+- Unlike §5.18, this one **does** set pagination guides, pointing at its own path. Verified.
+- `group_meal_plan_rules` is empty here.
+- **Not implemented** — the three writes.
+
+### Out of scope for round 5
+
+- `ShoppingListService` in every form: item merging, recipe ingredient expansion, quantity
+  increment and decrement, label repositioning.
+- Random meal-plan selection and the rule engine behind it.
+- The event bus behind every shopping-list and meal-plan write.
+
+### Database safety for this round
+
+**Corrected after the self-check wrote to the shared database.** The assumption that an empty
+object body is always rejected is wrong for two of these endpoints: `ShoppingListCreate` and
+`PlanRulesCreate` have a default for every field, so `POST /households/shopping/lists` and
+`POST /households/mealplans/rules` answer **201 and create a row** when sent `{}`. The round 5
+self-check did exactly that and added one shopping list and one meal-plan rule before it was
+noticed; the database was restored from `dev/data/mealie.w3-snapshot.db` with the oracle stopped
+(`sandbox/restore-db.sh`) and the request list changed to use `parity.hurl`'s own scalar body `0`,
+which is a 422 on every endpoint.
+
+The lesson generalizes: **a probe body is only safe if the schema has a required field.** Checking
+that before sending is now part of building each round's request list.
+
+Three endpoints turn out to be implementable without writing anything, because an empty collection
+is valid input that creates nothing:
+
+| Request | Response |
+|---|---|
+| `POST /shopping/items/create-bulk` with `[]` | **201** `{"createdItems":[],"updatedItems":[],"deletedItems":[]}` |
+| `PUT /shopping/items` with `[]` | **200**, same body |
+| `DELETE /shopping/items` with no `ids` | **200** `{"message":"","error":false}` |
+
+Everything else that writes is left unimplemented, so the reachable paths are reads, 404s, 422s and
+§5.14's 400. `dev/data/mealie.db` is compared against the snapshot after every run.

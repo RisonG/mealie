@@ -3,8 +3,12 @@
 namespace App\Support;
 
 /**
- * SQLite stores datetimes as "Y-m-d H:i:s[.u]" with no zone. Pydantic serializes a naive datetime
- * as ISO 8601 without an offset, so the only change needed is the date/time separator.
+ * SQLite stores these columns naive, e.g. "2026-07-30 22:36:59.914360", but
+ * NaiveDateTime.process_result_value (mealie/db/models/_model_utils/datetime.py:43-50) puts UTC
+ * back on every value as it is read, so pydantic serializes it with a Z:
+ * "2026-07-30T22:36:59.914360Z".
+ *
+ * Python's isoformat drops the microseconds when they are zero, so ".000000" becomes nothing.
  */
 class Dates
 {
@@ -14,6 +18,22 @@ class Dates
             return null;
         }
 
-        return str_replace(' ', 'T', trim($value));
+        $text = str_replace(' ', 'T', trim($value));
+
+        if (str_ends_with($text, '.000000')) {
+            $text = substr($text, 0, -7);
+        }
+
+        return $text.'Z';
+    }
+
+    /** A plain date column (mealplan.date) has no time part and no zone. */
+    public static function dateOut(?string $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return explode(' ', explode('T', trim($value))[0])[0];
     }
 }
