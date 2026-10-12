@@ -179,8 +179,8 @@ with a link, a short description, completion status, and the issue or reason beh
 
 | # | Type | Title | Status | Link |
 |---|---|---|---|---|
-| 8306 | Issue | Deleting a food used only as a recipe substitution leaves orphaned/broken references with no warning | Closed 2026-09-06 | [issues/8306](https://github.com/mealie-recipes/mealie/issues/8306) |
-| 8308 | Issue | A single food with a NULL description crashes the entire foods list endpoint (500), silently shown as "no data" | Closed 2026-09-06 | [issues/8308](https://github.com/mealie-recipes/mealie/issues/8308) |
+| 8306 | Issue | Deleting a food used only as a recipe substitution leaves orphaned/broken references with no warning | **Fixed and closed 2026-09-06** by maintainer PR [#8311](https://github.com/mealie-recipes/mealie/pull/8311) | [issues/8306](https://github.com/mealie-recipes/mealie/issues/8306) |
+| 8308 | Issue | A single food with a NULL description crashes the entire foods list endpoint (500), silently shown as "no data" | **Fixed and closed 2026-09-06** by PR [#8309](https://github.com/mealie-recipes/mealie/pull/8309) | [issues/8308](https://github.com/mealie-recipes/mealie/issues/8308) |
 | 8111 | PR | fix: prevent duplicate iOS camera photos from overwriting recipe step assets | **Merged 2026-09-16** — 3 commits, +52/−2, 2 files | [pull/8111](https://github.com/mealie-recipes/mealie/pull/8111) |
 | 8487 | PR | fix: shopping list item order reverting after drag-and-drop reorder | **Open** since 2026-09-21 — 1 commit, +16/−0, 2 files | [pull/8487](https://github.com/mealie-recipes/mealie/pull/8487) |
 
@@ -188,8 +188,14 @@ with a link, a short description, completion status, and the issue or reason beh
   shots, so a second photo overwrote the first on a recipe step. Merged upstream.
 - **#8487** is a frontend state bug — after a drag-and-drop reorder the shopping list snaps back to
   its previous order. Still awaiting maintainer review; no changes requested so far.
-- **#8306 and #8308** are both data-integrity bugs found in `ingredient_foods` while working in that
-  area. Both were closed by the maintainers on the day they were filed.
+- **#8306 and #8308** are both data-integrity bugs in `ingredient_foods`, found while working in
+  that area. Neither was fixed by this member: both were filed, triaged and **fixed by other
+  people's merged PRs on the same day** — #8306 by maintainer `michael-genson` in
+  [#8311](https://github.com/mealie-recipes/mealie/pull/8311) ("Thanks for the report! This will be
+  fixed by…"), #8308 by contributor `chiliec` in
+  [#8309](https://github.com/mealie-recipes/mealie/pull/8309). The contribution here is the
+  diagnosis and the reproduction, not the patch, and the report should say so plainly — a
+  same-day maintainer fix is a reasonable signal that the reports were clear and actionable.
 
 ### 9.2 Code review deliverable
 
