@@ -1,6 +1,6 @@
 # Individual contribution report — COMPX574 mini-project
 
-**Name:** _[fill in]_  **Student ID:** _[fill in]_  **Email:** _[fill in]_
+**Name:** Rison Guan  **Student ID:** 1675407  **Email:** _[student email]_
 **GitHub:** [@RisonG](https://github.com/RisonG)
 **Project:** [mealie-recipes/mealie](https://github.com/mealie-recipes/mealie)
 

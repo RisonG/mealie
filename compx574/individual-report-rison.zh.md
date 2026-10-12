@@ -1,6 +1,6 @@
 # 个人贡献报告 —— COMPX574 mini-project
 
-**姓名：** _[填写]_　**学号：** _[填写]_　**邮箱：** _[填写]_
+**姓名：** Rison Guan　**学号：** 1675407　**邮箱：** _[填写学生邮箱]_
 **GitHub：** [@RisonG](https://github.com/RisonG)
 **项目：** [mealie-recipes/mealie](https://github.com/mealie-recipes/mealie)
 
