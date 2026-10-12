@@ -18,15 +18,44 @@ The operator reviewed between the two. Nine rounds, so nine review points.
 
 ## 2. Tool, model, cost, time, human effort
 
+All figures below are read from the Claude Code session transcript for this work
+(`~/.claude/projects/.../e60c4929-….jsonl`), not estimated.
+
 | Item | Value |
 |---|---|
 | Tool | Claude Code (CLI), one main-loop agent; sub-agents forbidden by the prompt |
-| Model | Claude Opus 5 (`claude-opus-5`) |
-| Human turns | ~20 total: ~11 in setup and method design, then **9 approvals**, one per gate |
-| Human review depth | The operator approved each gate by replying "continue" without marking the contract. The log records the gates as **agent-run**, the same as W5 |
-| Elapsed | Nine round-commits spanning roughly 20 hours, but that includes long idle periods waiting for the operator. Agent working time per round is better read from the rounds where the operator replied immediately: **rounds 8 and 9 took 17 and 14 minutes** end to end, including contract, implementation, self-check and scoring. Mid-size rounds ran 78–93 minutes |
-| Timestamp caveat | Commits were made from two machines (host and dev container) in different timezones, so the raw `git log` times are not a clean wall clock |
-| Token cost | **Not instrumented.** W5 could report per-agent token counts because Claude Code reports usage for sub-agents; a single main-loop session has no equivalent readout the agent can access. If a number is needed, the operator can read it from Claude Code's `/usage`. This is a gap in W3's evidence and should be stated as one rather than estimated |
+| Model | **`claude-opus-5`** — all 843 assistant turns, single model throughout, no fallback |
+| Agent turns | 843 |
+| Tool calls | 366 (364 Bash, 2 AskUserQuestion) |
+| **Active agent time** | **≈2.6 hours** — the sum of gaps between consecutive events of 10 minutes or less |
+| Wall-clock span | 48.9 hours, 2026-10-10 01:26 → 2026-10-12 02:20 UTC |
+| Waiting on the operator | 46.3 hours across 19 pauses, longest 17.9 hours (overnight). The agent is idle in all of it |
+| Human turns | ~20: about 11 in setup and method design, then **9 approvals**, one per gate |
+| Human review depth | Each gate was approved by replying "continue" without marking the contract. The log records the gates as **agent-run**, the same as W5 |
+
+**Tokens** (same source, whole session including setup and this report):
+
+| | Tokens |
+|---|---:|
+| Output | 961,821 |
+| Cache write | 10,485,983 |
+| Cache read | 320,301,766 |
+| Fresh input | 1,686 |
+| Total | 331,751,256 |
+
+Cache reads dominate, which is what a long single session looks like: the conversation is re-read
+on every turn at cache-read rates rather than re-sent at input rates. **A dollar figure is not given
+here** because it depends on the operator's plan rather than on these counts alone; Claude Code's
+`/usage` is the authoritative source if the report needs one.
+
+Comparability note: W5 reports per-sub-agent token counts (1,271,413 for its four resumed agents),
+which is a different unit — those are four short delegated runs, not one 843-turn session that also
+contains the setup, the method design and the write-up. The two numbers should not be put in the
+same column without saying so.
+
+Per-round effort, for a sense of scale: rounds 8 and 9 — where the operator replied immediately —
+took **17 and 14 minutes** end to end including contract, implementation, self-check and scoring.
+Mid-size rounds ran 78–93 minutes of combined agent-and-waiting time.
 
 ## 3. Results
 
